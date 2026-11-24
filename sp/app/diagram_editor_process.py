@@ -81,6 +81,9 @@ class StandaloneGeometryStore(QObject):
         splitter = getattr(self.window, "_vertical_splitter", None)
         if vertical and splitter is not None:
             splitter.restoreState(self._bytes(vertical))
+        header = getattr(self.window, "header_controls", None)
+        if header is not None:
+            header.restore_visibility()
 
     def save(self) -> None:
         try:
@@ -207,11 +210,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.editor == "plantuml":
         from sp.app.ui.plantuml_editor_window import PlantUMLEditorWindow
 
-        window = PlantUMLEditorWindow(args.path, parent=None)
+        window = PlantUMLEditorWindow(args.path, parent=None, settings_scope=args.geometry_scope)
     else:
         from sp.app.ui.mermaid_editor_window import MermaidEditorWindow
 
-        window = MermaidEditorWindow(args.path, parent=None)
+        window = MermaidEditorWindow(args.path, parent=None, settings_scope=args.geometry_scope)
 
     geometry_store = StandaloneGeometryStore(
         window,

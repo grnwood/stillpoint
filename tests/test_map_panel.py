@@ -1269,6 +1269,9 @@ def test_focus_editor_line_reveals_expands_and_centers_containing_heading(qtbot,
 
 
 def test_open_map_reuses_window_and_follows_editor_cursor_and_page(main_window, qtbot, monkeypatch):
+    # Exercise the in-process path retained on Windows and Linux. macOS's
+    # independent process lifecycle is covered in test_companion_process.py.
+    monkeypatch.setattr("sp.app.ui.main_window.sys.platform", "linux")
     monkeypatch.setattr(main_window, "_save_current_file", lambda *args, **kwargs: None)
     monkeypatch.setattr(main_window, "_save_before_page_transition", lambda **kwargs: True)
     monkeypatch.setattr("sp.app.ui.main_window.config.has_active_vault", lambda: True)
@@ -1376,6 +1379,7 @@ def test_map_undo_survives_rendered_editor_round_trip(main_window, qtbot, monkey
 
 @pytest.mark.parametrize("undo_key,mods", [(Qt.Key_U, Qt.NoModifier), (Qt.Key_Z, Qt.ControlModifier)])
 def test_inline_rename_undo_after_canvas_focus_refresh(main_window, qtbot, monkeypatch, undo_key, mods):
+    monkeypatch.setattr("sp.app.ui.main_window.sys.platform", "linux")
     monkeypatch.setattr(main_window, "_save_current_file", lambda *args, **kwargs: None)
     monkeypatch.setattr("sp.app.ui.main_window.config.has_active_vault", lambda: True)
     monkeypatch.setattr("sp.app.ui.map_panel.config.load_vi_mode_enabled", lambda: True)

@@ -96,6 +96,7 @@ def main(argv: list[str] | None = None) -> int:
 
     app = QApplication(sys.argv[:1])
     configure_diagram_editor_application(app, "excalidraw")
+    app.setQuitOnLastWindowClosed(True)
     window = ExcalidrawWindow(args.title)
     web = QWebEngineView(window)
     window.setCentralWidget(web)

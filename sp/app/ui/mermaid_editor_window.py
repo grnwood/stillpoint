@@ -202,7 +202,7 @@ class MermaidEditorWindow(QMainWindow):
 
     fileSaved = Signal(str)
 
-    def __init__(self, file_path: str, parent=None, on_save=None) -> None:
+    def __init__(self, file_path: str, parent=None, on_save=None, *, settings_scope="main") -> None:
         super().__init__(parent)
 
         from sp.app.ui.diagram_editor_icons import get_diagram_editor_icon
@@ -249,6 +249,8 @@ class MermaidEditorWindow(QMainWindow):
         main_widget = QWidget()
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(0, 0, 0, 0)
+        from .diagram_editor_header import DiagramEditorHeader
+        self.header_controls = DiagramEditorHeader("mermaid", settings_scope, self)
 
         toolbar_layout = QHBoxLayout()
         toolbar_layout.setContentsMargins(5, 5, 5, 5)
@@ -358,7 +360,7 @@ class MermaidEditorWindow(QMainWindow):
 
         toolbar_layout.addLayout(preview_section)
 
-        main_layout.addLayout(toolbar_layout)
+        self.header_controls.add_row(toolbar_layout)
 
         center_widget = QWidget()
         center_layout = QVBoxLayout()
@@ -411,7 +413,8 @@ class MermaidEditorWindow(QMainWindow):
         if self._ai_chat_enabled:
             self._load_ai_servers_models()
 
-        center_layout.addLayout(shortcuts_layout)
+        self.header_controls.add_row(shortcuts_layout)
+        main_layout.addWidget(self.header_controls)
 
         main_h_splitter = QSplitter(Qt.Horizontal)
 
@@ -505,15 +508,16 @@ class MermaidEditorWindow(QMainWindow):
             main_h_splitter.setSizes([1000])
             main_h_splitter.setCollapsible(0, False)
 
-        center_layout.addWidget(main_h_splitter)
+        center_layout.addWidget(self.header_controls.wrap_code_surface(main_h_splitter))
         center_widget.setLayout(center_layout)
-        main_layout.addWidget(center_widget)
+        main_layout.addWidget(center_widget, 1)
 
         main_widget.setLayout(main_layout)
         self.setCentralWidget(main_widget)
 
         self.editor_preview_splitter = main_h_splitter
         self._vertical_splitter = right_v_splitter
+        self.header_controls.bind(main_h_splitter, self.ai_panel, right_v_splitter)
 
         self._geom_timer = QTimer()
         self._geom_timer.setSingleShot(True)
@@ -703,6 +707,7 @@ class MermaidEditorWindow(QMainWindow):
             self.editor_preview_splitter.setSizes([max(1, total * 2 // 5), max(1, total * 3 // 5)])
 
         if self._vertical_splitter is None:
+            self.header_controls.restore_visibility()
             return
         v_restored = False
         if self._pending_vsplit_state:
@@ -718,6 +723,8 @@ class MermaidEditorWindow(QMainWindow):
             chat_height = min(chat_hint, max(1, total // 3))
             preview_height = max(1, total - self._vertical_splitter.handleWidth() - chat_height)
             self._vertical_splitter.setSizes([preview_height, chat_height])
+
+        self.header_controls.restore_visibility()
 
     def _run_render_in_background(self, token: int, render_fn) -> None:
         def _worker() -> None:

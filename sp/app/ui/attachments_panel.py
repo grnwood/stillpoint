@@ -5,6 +5,7 @@ import hashlib
 import itertools
 import os
 import shutil
+import sys
 import time
 from pathlib import Path
 from typing import Optional, Callable, Any
@@ -12,8 +13,8 @@ from urllib.parse import urlparse
 
 import httpx
 
-from PySide6.QtCore import Qt, QUrl, QSize, QMimeData, Signal
-from PySide6.QtGui import QIcon, QPixmap, QDesktopServices, QDrag
+from PySide6.QtCore import Qt, QUrl, QSize, QMimeData, Signal, QEvent
+from PySide6.QtGui import QIcon, QDesktopServices, QDrag, QPainter, QPixmap, QPalette
 from PySide6.QtWidgets import (
     QApplication,
     QStyle,
@@ -34,6 +35,7 @@ from PySide6.QtWidgets import (
 from .page_load_logger import PAGE_LOGGING_ENABLED
 from .theme import apply_menu_theme
 from .canvas_navigation import install_primary_wheel_zoom
+from .diagram_editor_icons import get_diagram_editor_icon
 from sp.app.external_launch import open_path_in_system
 from sp.logging_flags import log_enabled
 
@@ -42,6 +44,18 @@ _DETAILED_LOGGING = log_enabled("attachments_media")
 
 class AttachmentsListWidget(QListWidget):
     """Custom list widget that provides proper drag data for file attachments."""
+
+    deleteRequested = Signal()
+
+    def keyPressEvent(self, event):  # type: ignore[override]
+        delete_key = event.key() == Qt.Key_Delete or (
+            sys.platform == "darwin" and event.key() == Qt.Key_Backspace
+        )
+        if delete_key and event.modifiers() == Qt.NoModifier:
+            self.deleteRequested.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
     
     def mimeData(self, items):
         """Create mime data with file URLs for dragging."""
@@ -72,7 +86,8 @@ class AttachmentsPanel(QWidget):
     # Signal emitted when local attachment files changed on disk.
     attachmentsModified = Signal(str)
     # Emitted only after the current page's attachment listing completed.
-    countReady = Signal(object, int)  # page path, definitive file count
+    countReady = Signal(object, int)  # page path, definitive visible file count
+    hiddenFilesVisibilityChanged = Signal(bool)
 
     def __init__(
         self,
@@ -93,6 +108,7 @@ class AttachmentsPanel(QWidget):
         
         self.current_page_path: Optional[Path] = None
         self.zoom_level = 0  # 0=list, 1=small icons, 2=medium icons, 3=large icons
+        self._show_hidden_files = False
         self.icon_provider = QFileIconProvider()
         
         # Create toolbar with folder, refresh, and zoom buttons
@@ -135,6 +151,14 @@ class AttachmentsPanel(QWidget):
         toolbar.addWidget(self.refresh_button)
         
         toolbar.addStretch()
+
+        self.hidden_files_button = QToolButton()
+        self.hidden_files_button.setCheckable(True)
+        self.hidden_files_button.setAccessibleName("Show hidden attachment files")
+        self.hidden_files_button.setIconSize(QSize(18, 18))
+        self.hidden_files_button.toggled.connect(self._toggle_hidden_files)
+        self._update_hidden_files_icon()
+        toolbar.addWidget(self.hidden_files_button)
         
         self.zoom_out_button = QToolButton()
         self.zoom_out_button.setText("−")  # Minus
@@ -152,6 +176,8 @@ class AttachmentsPanel(QWidget):
         
         # Create list widget for attachments
         self.attachments_list = AttachmentsListWidget()
+        self.attachments_list.setSelectionMode(QListWidget.ExtendedSelection)
+        self.attachments_list.deleteRequested.connect(self._remove_selected_attachments)
         self.attachments_list.itemDoubleClicked.connect(self._open_attachment)
         self.attachments_list.setDragEnabled(True)
         self.attachments_list.setDragDropMode(QListWidget.DragOnly)
@@ -282,7 +308,7 @@ class AttachmentsPanel(QWidget):
         except (OSError, PermissionError):
             pass
         else:
-            self.countReady.emit(self.current_page_path, self.attachments_list.count())
+            self._apply_hidden_files_filter()
             #if PAGE_LOGGING_ENABLED:
                 #print(f"[PageLoadAndRender] attachments refresh total={(time.perf_counter()-t0)*1000:.1f}ms")
             self._sync_with_server(attachments)
@@ -337,14 +363,58 @@ class AttachmentsPanel(QWidget):
                     label = f"{name} (remote)"
             item.setText(label)
             item.setData(Qt.UserRole, {"kind": "remote", "path": str(attachment_path)})
-            icon = self.icon_provider.icon(QFileIconProvider.File)
+            icon = self._get_file_icon(Path(str(attachment_path)))
             if icon:
                 item.setIcon(icon)
             self.attachments_list.addItem(item)
-        self.countReady.emit(self.current_page_path, self.attachments_list.count())
+        self._apply_hidden_files_filter()
         #if PAGE_LOGGING_ENABLED:
             #print(f"[PageLoadAndRender] attachments refresh remote total={(time.perf_counter()-t0)*1000:.1f}ms")
         self._update_remove_button_state()
+
+    def _toggle_hidden_files(self, visible: bool) -> None:
+        self._show_hidden_files = visible
+        self._update_hidden_files_icon()
+        self.hiddenFilesVisibilityChanged.emit(visible)
+        self._apply_hidden_files_filter()
+
+    def _apply_hidden_files_filter(self) -> None:
+        visible_count = 0
+        for row in range(self.attachments_list.count()):
+            item = self.attachments_list.item(row)
+            data = item.data(Qt.UserRole)
+            path = data.get("path", "") if isinstance(data, dict) else str(data or "")
+            hidden = not self._show_hidden_files and Path(path).name.startswith(".")
+            if hidden:
+                item.setSelected(False)
+            item.setHidden(hidden)
+            visible_count += not hidden
+        # Keep all files in the list/cache: a visibility toggle must never be
+        # interpreted as deleting an attachment during server reconciliation.
+        self.countReady.emit(self.current_page_path, visible_count)
+
+    def _update_hidden_files_icon(self) -> None:
+        asset = "open-eye.svg" if self._show_hidden_files else "closed-eye.svg"
+        path = Path(__file__).resolve().parents[2] / "assets" / asset
+        pixmap = QIcon(str(path)).pixmap(self.hidden_files_button.iconSize())
+        if not pixmap.isNull():
+            tinted = QPixmap(pixmap.size())
+            tinted.setDevicePixelRatio(pixmap.devicePixelRatio())
+            tinted.fill(Qt.transparent)
+            painter = QPainter(tinted)
+            painter.drawPixmap(0, 0, pixmap)
+            painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+            painter.fillRect(tinted.rect(), self.palette().color(QPalette.ButtonText))
+            painter.end()
+            self.hidden_files_button.setIcon(QIcon(tinted))
+        self.hidden_files_button.setToolTip(
+            "Hide hidden files" if self._show_hidden_files else "Show hidden files"
+        )
+
+    def changeEvent(self, event) -> None:  # type: ignore[override]
+        super().changeEvent(event)
+        if event.type() == QEvent.PaletteChange and hasattr(self, "hidden_files_button"):
+            self._update_hidden_files_icon()
 
     def _get_remote_cache_root(self) -> Optional[Path]:
         if not self._api_base:
@@ -500,6 +570,62 @@ class AttachmentsPanel(QWidget):
         self._refresh_attachments()
         self.attachmentsModified.emit("attachments removed")
 
+    def _rename_selected_attachment(self) -> None:
+        selected = self.attachments_list.selectedItems()
+        if len(selected) != 1 or not self.current_page_path:
+            return
+        data = selected[0].data(Qt.UserRole)
+        old_path = data.get("path") if isinstance(data, dict) else data
+        if not old_path:
+            return
+        old_name = Path(old_path).name
+        name, accepted = QInputDialog.getText(
+            self, "Rename Attachment", "Filename:", text=old_name,
+        )
+        if not accepted or name == old_name:
+            return
+        try:
+            if not name.strip() or name in {".", ".."} or any(c in name for c in '/\\\x00\r\n'):
+                raise ValueError("Enter a filename without folders or line breaks.")
+            if self._http_client is not None:
+                path = old_path if self._remote_mode else self._attachment_relative_path(Path(old_path))
+                page = self._current_page_key()
+                if not path or not page:
+                    raise ValueError("The attachment must belong to the current vault.")
+                payload = {"page_path": page, "attachment_path": path, "name": name}
+                response = self._http_client.post("/files/rename", json=payload)
+                if response.status_code == 401 and self._auth_prompt and self._auth_prompt():
+                    response = self._http_client.post("/files/rename", json=payload)
+                response.raise_for_status()
+                known = self._page_attachment_cache.get(page)
+                if known is not None:
+                    known.discard(path)
+                    known.add(Path(path).with_name(name).as_posix())
+            else:
+                from sp.attachment_ops import rename_attachment
+
+                root = self.vault_root or self.current_page_path.parent
+                rename_attachment(root, str(self.current_page_path.relative_to(root)),
+                                  str(Path(old_path).relative_to(root)), name)
+        except (ValueError, OSError, httpx.HTTPError) as exc:
+            detail = str(exc)
+            if isinstance(exc, httpx.HTTPStatusError):
+                try:
+                    detail = str(exc.response.json().get("detail", detail))
+                except ValueError:
+                    pass
+            QMessageBox.warning(self, "Rename Attachment", detail)
+            return
+        self._refresh_attachments()
+        for row in range(self.attachments_list.count()):
+            item = self.attachments_list.item(row)
+            value = item.data(Qt.UserRole)
+            path = value.get("path") if isinstance(value, dict) else value
+            if path and Path(path).name == name and not item.isHidden():
+                self.attachments_list.setCurrentItem(item)
+                break
+        self.attachmentsModified.emit("attachment renamed")
+
     def _current_page_key(self) -> Optional[str]:
         if not self.current_page_path:
             return None
@@ -592,26 +718,15 @@ class AttachmentsPanel(QWidget):
             return False
     
     def _get_file_icon(self, file_path: Path) -> QIcon:
-        """Get an icon for a file - thumbnail for images, OS icon for others."""
-        if file_path.suffix.lower() in ['.png', '.jpg', '.jpeg', '.gif', '.bmp']:
-            # Create thumbnail for image files
-            load_t0 = time.perf_counter()
-            pixmap = QPixmap(str(file_path))
-            if not pixmap.isNull():
-                # Scale based on zoom level
-                if self.zoom_level == 1:  # Small
-                    size = 48
-                elif self.zoom_level == 2:  # Medium
-                    size = 96
-                else:  # Large
-                    size = 144
-                
-                scaled = pixmap.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                #if PAGE_LOGGING_ENABLED:
-                    #print(f"[PageLoadAndRender] attachments thumbnail {file_path.name} load+scale={(time.perf_counter()-load_t0)*1000:.1f}ms")
-                return QIcon(scaled)
-        
-        # Use OS file icon for non-images or if thumbnail failed
+        """Use StillPoint diagram identities, then the OS's file-type icons."""
+        suffix = file_path.suffix.lower()
+        editor = {".puml": "plantuml", ".plantuml": "plantuml",
+                  ".mmd": "mermaid", ".mermaid": "mermaid",
+                  ".excalidraw": "excalidraw"}.get(suffix)
+        if editor:
+            icon = get_diagram_editor_icon(editor)
+            if not icon.isNull():
+                return icon
         from PySide6.QtCore import QFileInfo
         return self.icon_provider.icon(QFileInfo(str(file_path)))
     
@@ -735,6 +850,10 @@ class AttachmentsPanel(QWidget):
 
         add_excalidraw_action = menu.addAction("Add new Excalidraw...")
         add_excalidraw_action.triggered.connect(self._create_new_excalidraw)
+
+        rename_action = menu.addAction("Rename…")
+        rename_action.setEnabled(len(selected) == 1)
+        rename_action.triggered.connect(self._rename_selected_attachment)
 
         delete_action = menu.addAction("Delete")
         delete_action.setEnabled(bool(selected))

@@ -57,6 +57,7 @@ class TabbedRightPanel(QWidget):
     linkBackRequested = Signal()
     linkForwardRequested = Signal()
     linkHomeRequested = Signal()
+    attachmentContextChanged = Signal(object)  # active page or attachment refresh
     
     def __init__(
         self,
@@ -279,6 +280,7 @@ class TabbedRightPanel(QWidget):
         page_changed = page_path != self._current_page_path
         self._current_page_path = page_path
         self._current_relative_path = relative_path
+        self.attachmentContextChanged.emit(page_path)
         if page_changed:
             self._attachments_count = None
             self._update_attachments_tab_label()
@@ -427,6 +429,7 @@ class TabbedRightPanel(QWidget):
     
     def refresh_attachments(self) -> None:
         """Refresh the attachments panel."""
+        self.attachmentContextChanged.emit(self._current_page_path)
         if self._is_panel_currently_visible(self.attachments_panel):
             self.attachments_panel.refresh()
             self._pending_attachments_refresh = False

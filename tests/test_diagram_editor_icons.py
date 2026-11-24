@@ -69,7 +69,8 @@ def test_mode_icon_assets_cover_platforms_and_resolutions(qapp, slug, stem):
         assert image.width() == image.height() == size
 
 
-def test_standalone_editor_uses_native_macos_icon(qapp, tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("editor", ["excalidraw", "mindmap", "focus", "audience"])
+def test_standalone_editor_uses_native_macos_icon(qapp, tmp_path, monkeypatch, editor) -> None:
     from sp.app.folder_navigator import icon as folder_icon
 
     icon_path = tmp_path / "Excalidraw.icns"
@@ -83,7 +84,7 @@ def test_standalone_editor_uses_native_macos_icon(qapp, tmp_path, monkeypatch) -
         lambda path: native_calls.append(path) or True,
     )
 
-    icons.configure_diagram_editor_application(qapp, "excalidraw")
+    icons.configure_diagram_editor_application(qapp, editor)
 
     assert native_calls == [icon_path]
 

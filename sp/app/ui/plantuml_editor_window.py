@@ -983,7 +983,7 @@ class PlantUMLEditorWindow(QMainWindow):
 
     fileSaved = Signal(str)
 
-    def __init__(self, file_path: str, parent=None, on_save=None) -> None:
+    def __init__(self, file_path: str, parent=None, on_save=None, *, settings_scope="main") -> None:
         super().__init__(parent)
         
         # Set window icon explicitly (especially important on Windows)
@@ -1024,6 +1024,8 @@ class PlantUMLEditorWindow(QMainWindow):
         main_widget = QWidget()
         main_layout = QVBoxLayout()
         main_layout.setContentsMargins(0, 0, 0, 0)
+        from .diagram_editor_header import DiagramEditorHeader
+        self.header_controls = DiagramEditorHeader("plantuml", settings_scope, self)
         
         # Create toolbar with zoom buttons and export
         toolbar_layout = QHBoxLayout()
@@ -1116,7 +1118,7 @@ class PlantUMLEditorWindow(QMainWindow):
         
         toolbar_layout.addLayout(preview_section)
         
-        main_layout.addLayout(toolbar_layout)
+        self.header_controls.add_row(toolbar_layout)
         
         # Create center widget with shortcuts dropdown above split view
         center_widget = QWidget()
@@ -1175,7 +1177,8 @@ class PlantUMLEditorWindow(QMainWindow):
         if self._ai_chat_enabled:
             self._load_ai_servers_models()
         
-        center_layout.addLayout(shortcuts_layout)
+        self.header_controls.add_row(shortcuts_layout)
+        main_layout.addWidget(self.header_controls)
         
         # Main horizontal splitter: Editor (left) | Preview & Chat (right)
         main_h_splitter = QSplitter(Qt.Horizontal)
@@ -1251,9 +1254,9 @@ class PlantUMLEditorWindow(QMainWindow):
         self.editor_preview_splitter = main_h_splitter
         main_h_splitter.splitterMoved.connect(self._on_splitter_moved)
         
-        center_layout.addWidget(main_h_splitter)
+        center_layout.addWidget(self.header_controls.wrap_code_surface(main_h_splitter))
         center_widget.setLayout(center_layout)
-        main_layout.addWidget(center_widget)
+        main_layout.addWidget(center_widget, 1)
         main_widget.setLayout(main_layout)
         self.setCentralWidget(main_widget)
 
@@ -1265,6 +1268,7 @@ class PlantUMLEditorWindow(QMainWindow):
 
         # Wire splitters to save state
         self._vertical_splitter = right_v_splitter
+        self.header_controls.bind(main_h_splitter, self.ai_panel, right_v_splitter)
         if self._ai_chat_enabled:
             self._vertical_splitter.splitterMoved.connect(lambda *_: self._geom_timer.start())
         self.editor_preview_splitter.splitterMoved.connect(lambda *_: self._geom_timer.start())
@@ -1512,6 +1516,8 @@ class PlantUMLEditorWindow(QMainWindow):
             chat_height = min(chat_hint, max(1, total // 3))
             preview_height = max(1, total - self._vertical_splitter.handleWidth() - chat_height)
             self._vertical_splitter.setSizes([preview_height, chat_height])
+
+        self.header_controls.restore_visibility()
 
     def _initialize_after_show(self) -> None:
         """Finish startup only after the window has had a chance to paint once."""

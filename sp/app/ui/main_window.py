@@ -3098,6 +3098,14 @@ class MainWindow(QMainWindow):
         self._editor_view_stack.addWidget(self.editor)
         self._editor_view_stack.addWidget(self.reading_view)
         self._editor_view_stack.setCurrentWidget(self.editor)
+        from .attachment_indicator import AttachmentIndicator
+        self._attachment_indicator = AttachmentIndicator(self)
+        self._attachment_indicator.triggered.connect(self._focus_attachments_tab)
+        self.right_panel.attachmentContextChanged.connect(self._refresh_attachment_indicator)
+        self.right_panel.attachments_panel.countReady.connect(self._attachment_indicator.set_count)
+        self.right_panel.attachments_panel.hiddenFilesVisibilityChanged.connect(
+            self._attachment_indicator.set_show_hidden
+        )
         toggle_sequences = ["Ctrl+Space"]
         if sys.platform == "darwin":
             # Qt spells Command as Ctrl on macOS; retain physical Control too.
@@ -4336,6 +4344,14 @@ class MainWindow(QMainWindow):
         self.main_toolbar_identity.hide()
         self._update_main_utility_identity()
         
+        # Page attachments stay beside Settings in both edit and reading mode.
+        attachment_icon = self._load_icon(
+            self._find_asset("attachment-paperclip.svg"), icon_color, size=18,
+        )
+        if attachment_icon:
+            self._attachment_indicator.setIcon(attachment_icon)
+        self.toolbar.addAction(self._attachment_indicator)
+
         # Preferences/settings cog icon
         prefs_action = QAction("Preferences", self)
         cog_icon_path = self._find_asset("cog.svg")
@@ -10502,6 +10518,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Homebase Auth Reset Failed", str(exc))
 
     def _on_local_attachment_changed(self, reason: str) -> None:
+        self._refresh_attachment_indicator(self.right_panel._current_page_path)
         self._mark_homebase_unsynced_local_change()
         self._schedule_homebase_sync(reason or "attachment write")
 
@@ -12100,6 +12117,7 @@ class MainWindow(QMainWindow):
             ("_toolbar_today_action", "calendar-days.svg", 18),
             ("bookmark_button", "bookmark.svg", 18),
             ("_toolbar_print_action", "print.svg", 18),
+            ("_attachment_indicator", "attachment-paperclip.svg", 18),
             ("_toolbar_prefs_action", "cog.svg", 18),
         ):
             action = getattr(self, action_name, None)
@@ -15055,6 +15073,7 @@ class MainWindow(QMainWindow):
             self._vi_enable_pending = True
             self.editor.set_vi_mode_enabled(False)
         self.current_path = None
+        self._attachment_indicator.set_page(None)
         self.right_panel.set_current_page(None, None)
         self._update_main_utility_identity()
         self._update_main_cursor_status()
@@ -15184,6 +15203,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.current_path = path
+        self._attachment_indicator.set_page(None)
         self._update_main_utility_identity()
         self._pending_top_nav_refresh = (path, history_buttons_changed)
         self._suspend_autosave = True
@@ -19860,6 +19880,9 @@ class MainWindow(QMainWindow):
                 pass
 
     def _refresh_detached_map_panels(self, path: Optional[str]) -> None:
+        companion = getattr(self, "_map_companion", None)
+        if companion is not None:
+            companion.refresh()
         panels = list(getattr(self, "_detached_map_panels", []))
         if not panels:
             return
@@ -20097,6 +20120,21 @@ class MainWindow(QMainWindow):
         from .map_panel import MapPanel
 
         cursor_line = self.editor.textCursor().blockNumber() + 1
+        if sys.platform == "darwin":
+            companion = getattr(self, "_map_companion", None)
+            if companion is not None:
+                companion.refresh(focus=True, line=cursor_line)
+                return
+            from sp.app.companion_process import CompanionWindow
+            try:
+                companion = CompanionWindow(self, "mindmap")
+                self._map_companion = companion
+                companion.closed.connect(lambda *_: setattr(self, "_map_companion", None))
+                companion.ready.connect(lambda: companion.refresh(focus=True, line=cursor_line))
+                companion.show()
+            except Exception as exc:
+                self._alert(f"Unable to open Map: {exc}")
+            return
         if self._detached_map_panels:
             self._focus_map_panel_window(self._detached_map_panels[0], cursor_line)
             return
@@ -20559,8 +20597,11 @@ class MainWindow(QMainWindow):
                     query += f"&{key}={quote(value, safe='')}"
             url = f"{self.api_base.rstrip('/')}/excalidraw/edit?{query}"
             if env_truthy("SP_DISABLE_EXCALIDRAW_WEBENGINE"):
-                QDesktopServices.openUrl(QUrl(url))
-                self._ensure_excalidraw_open_page_poll()
+                if QDesktopServices.openUrl(QUrl(url)):
+                    # A browser tab has no child process whose exit we can
+                    # observe. Preserve navigation for that explicit fallback.
+                    self._excalidraw_browser_navigation = True
+                    self._ensure_excalidraw_open_page_poll()
                 return
             title = f"Excalidraw - {target.name}"
             if getattr(sys, "frozen", False):
@@ -20649,7 +20690,14 @@ class MainWindow(QMainWindow):
             timer.start()
 
     def _poll_excalidraw_open_page_request(self) -> None:
-        if self._remote_mode or not self.http:
+        processes = [process for process in getattr(self, "_excalidraw_processes", [])
+                     if process.poll() is None]
+        self._excalidraw_processes = processes
+        if (self._remote_mode or not self.http or self.property("_sp_closing")
+                or (not processes and not getattr(self, "_excalidraw_browser_navigation", False))):
+            timer = getattr(self, "_excalidraw_open_page_timer", None)
+            if timer is not None:
+                timer.stop()
             return
         try:
             resp = self.http.get("/api/excalidraw/open-page/next")
@@ -20795,17 +20843,21 @@ class MainWindow(QMainWindow):
             pass
         settings = config.load_focus_mode_settings() if normalized == "focus" else config.load_audience_mode_settings()
         try:
-            window = ModeWindow(
-                normalized,
-                self.editor,
-                vault_root=self.vault_root,
-                page_path=self.current_path,
-                read_only=self._read_only,
-                heading_provider=lambda: list(self._toc_headings or []),
-                settings=settings,
-                initial_cursor=getattr(self, "_last_cursor_for_mode", 0),
-                parent=self,
-            )
+            if sys.platform == "darwin":
+                from sp.app.companion_process import CompanionWindow
+                window = CompanionWindow(self, normalized)
+            else:
+                window = ModeWindow(
+                    normalized,
+                    self.editor,
+                    vault_root=self.vault_root,
+                    page_path=self.current_path,
+                    read_only=self._read_only,
+                    heading_provider=lambda: list(self._toc_headings or []),
+                    settings=settings,
+                    initial_cursor=getattr(self, "_last_cursor_for_mode", 0),
+                    parent=self,
+                )
             window.closed.connect(self._on_mode_overlay_closed)
             try:
                 window.ready.connect(self._on_mode_overlay_ready)
@@ -21415,6 +21467,7 @@ class MainWindow(QMainWindow):
         # Set up editor without saving to disk
         self._refresh_editor_context(rel_path)
         self.current_path = rel_path
+        self._attachment_indicator.set_page(None)
         self._update_main_utility_identity()
         self._suspend_autosave = True
         self._suspend_dirty_tracking = True
@@ -22452,6 +22505,12 @@ class MainWindow(QMainWindow):
                     break
         except Exception:
             pass
+
+    def _refresh_attachment_indicator(self, page_path) -> None:
+        self._attachment_indicator.set_page(
+            page_path, page_key=self.right_panel._current_relative_path,
+            client=self.http if self._remote_mode else None,
+        )
 
     def _mark_tree_arrow_nav(self) -> None:
         """Flag that tree navigation via arrow keys should keep focus on the tree."""
@@ -25035,6 +25094,7 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
                 self.current_path = None
+                self._attachment_indicator.set_page(None)
                 self._skip_next_selection_open = True
                 self._pending_selection = next_focus_path or self._parent_path(self.tree_view.currentIndex())
             try:
@@ -25765,6 +25825,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             self.current_path = None
+            self._attachment_indicator.set_page(None)
 
     def _remove_deleted_paths_from_history(self, deleted_folder_path: str) -> None:
         """Remove deleted page(s) from history buffer and persist."""
@@ -27421,6 +27482,17 @@ class MainWindow(QMainWindow):
                     return
             except Exception:
                 pass
+        companions = list(getattr(self, "_companion_windows", []))
+        if companions:
+            # Receive the last edit and wait for child processes to exit before
+            # saving the vault and destroying their QProcess handles.
+            event.ignore()
+            self.setProperty("_sp_closing", True)
+            for companion in companions:
+                if not companion._closing:
+                    companion.exited.connect(lambda: QTimer.singleShot(0, self.close))
+                    companion.close()
+            return
         # Block native QTextEdit painting before saves and cleanup begin. On
         # macOS, Command-Q may otherwise deliver a final expose event while the
         # document layout or syntax highlighter is entering teardown.

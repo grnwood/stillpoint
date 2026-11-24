@@ -1276,6 +1276,12 @@ class AttachmentDeletePayload(BaseModel):
     paths: List[str] = Field(..., description="Vault-relative attachment paths to delete")
 
 
+class AttachmentRenamePayload(BaseModel):
+    page_path: str
+    attachment_path: str
+    name: str
+
+
 class VectorAddPayload(BaseModel):
     page_ref: str
     text: str
@@ -6022,6 +6028,33 @@ def list_files(page_path: str) -> dict:
 
     _log_attachment(f"Listed {len(attachments)} attachment(s) for {normalized_page}")
     return {"attachments": attachments}
+
+
+@app.post("/files/rename")
+def rename_file_attachment(
+    payload: AttachmentRenamePayload,
+    user: AuthModels.UserInfo = Depends(require_write_user),
+) -> dict:
+    from sp.attachment_ops import rename_attachment
+
+    root = _get_vault_root()
+    page = _vault_relative_path(payload.page_path)
+    old_path = _vault_relative_path(payload.attachment_path)
+    try:
+        destination = rename_attachment(root, page, old_path, payload.name)
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    new_path = f"/{destination.relative_to(root.resolve()).as_posix()}"
+    if old_path != new_path:
+        config.delete_attachment_entry(old_path)
+    config.upsert_attachment_entry(page, new_path, str(destination))
+    return {"ok": True, "attachment_path": new_path}
 
 
 @app.post("/files/delete")

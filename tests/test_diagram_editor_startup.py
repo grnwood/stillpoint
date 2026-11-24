@@ -22,6 +22,17 @@ from sp.app.ui.plantuml_editor_window import PlantUMLEditorWindow, ZoomablePrevi
 from sp.server import api as server_api
 
 
+@pytest.fixture(autouse=True)
+def _isolated_header_settings(monkeypatch, tmp_path):
+    from PySide6.QtCore import QSettings
+    from sp.app.ui import diagram_editor_header
+
+    monkeypatch.setattr(
+        diagram_editor_header, "QSettings",
+        lambda *args: QSettings(str(tmp_path / "diagram-header.ini"), QSettings.IniFormat),
+    )
+
+
 def _wait_for(qapp, predicate, timeout: float = 2.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -1437,3 +1448,98 @@ def test_mermaid_error_svg_uses_qtsvg_compatible_text():
 
     assert "RuntimeError" in traceback_details
     assert "boom" in traceback_details
+
+
+@pytest.mark.parametrize("window_class,suffix,content", [
+    (PlantUMLEditorWindow, ".puml", "@startuml\nAlice -> Bob\n@enduml\n"),
+    (MermaidEditorWindow, ".mmd", "flowchart TD\nA --> B\n"),
+])
+def test_diagram_header_and_code_rail_persist_independently(
+    qapp, qtbot, monkeypatch, tmp_path, window_class, suffix, content,
+):
+    from PySide6.QtCore import QSettings
+    from PySide6.QtTest import QTest
+    from sp.app.ui import diagram_editor_header
+
+    _patch_common_editor_deps(monkeypatch)
+    monkeypatch.setattr(diagram_editor_header, "QSettings", lambda *args:
+                        QSettings(str(tmp_path / "header.ini"), QSettings.IniFormat))
+    monkeypatch.setattr("sp.app.ui.plantuml_editor_window.config.load_enable_ai_chats", lambda: True)
+    for cls in (PlantUMLEditorWindow, MermaidEditorWindow):
+        monkeypatch.setattr(cls, "_load_ai_servers_models", lambda self: None)
+        monkeypatch.setattr(cls, "_render", lambda self: None)
+        monkeypatch.setattr(cls, "_save_geometry_prefs", lambda self: None)
+    monkeypatch.setattr(mermaid_editor_window, "_inline_preview_preference_enabled", lambda: True)
+    monkeypatch.setattr(mermaid_editor_window, "_should_use_web_preview", lambda: False)
+    source = tmp_path / f"diagram{suffix}"
+    source.write_text(content)
+
+    def open_editor(scope="main"):
+        window = window_class(str(source), settings_scope=scope)
+        qtbot.addWidget(window)
+        _wait_for(qapp, lambda: window._splitter_layout_initialized)
+        return window
+
+    first = open_editor()
+    controls = first.header_controls
+    assert controls.content.isVisible()
+    assert first.ai_panel.isVisible()
+    assert first.editor_preview_splitter.widget(0).isVisible()
+    assert not controls.header_toggle.icon().isNull()
+    assert not controls.code_toggle.icon().isNull()
+    assert not controls.isAncestorOf(controls.code_toggle)
+    assert controls.code_toggle.parentWidget() is first.editor_preview_splitter.parentWidget()
+    assert controls.code_toggle.y() == first.editor_preview_splitter.y()
+    QTest.mouseClick(controls.code_toggle, Qt.LeftButton)
+    assert first.editor_preview_splitter.widget(0).isHidden()
+    assert controls.content.isVisible()
+    QTest.mouseClick(controls.header_toggle, Qt.LeftButton)
+    assert controls.content.isHidden()
+    assert first.ai_panel.isHidden()
+    assert controls.header_toggle.isVisible()
+    assert controls.code_toggle.isVisible()
+    assert controls.code_toggle.y() == first.editor_preview_splitter.y()
+    _wait_for(qapp, lambda: controls.height() <= max(controls.header_toggle.height(), controls.code_toggle.height()))
+    assert controls.header_toggle.x() == 0
+    first.close()
+
+    second = open_editor()
+    assert second.header_controls.content.isHidden()
+    assert second.header_controls.header_toggle.x() == 0
+    assert second.ai_panel.isHidden()
+    assert second.editor_preview_splitter.widget(0).isHidden()
+    # The same type launched from Folder Navigator has independent controls.
+    navigator = open_editor("folder-navigator:/vault")
+    assert navigator.header_controls.content.isVisible()
+    assert navigator.ai_panel.isVisible()
+    assert navigator.editor_preview_splitter.widget(0).isVisible()
+    navigator.close()
+    second.header_controls.header_toggle.click()
+    assert second.ai_panel.isVisible()
+    assert second.editor_preview_splitter.widget(0).isHidden()
+    second.header_controls.code_toggle.click()
+    qapp.processEvents()
+    assert second.editor_preview_splitter.widget(0).isVisible()
+    assert all(size > 0 for size in second.editor_preview_splitter.sizes())
+    second.close()
+    third = open_editor()
+    assert third.header_controls.content.isVisible()
+    assert third.ai_panel.isVisible()
+    assert third.editor_preview_splitter.widget(0).isVisible()
+    third.close()
+
+
+def test_diagram_header_state_is_separate_for_each_editor_kind(qtbot, monkeypatch, tmp_path):
+    from PySide6.QtCore import QSettings
+    from sp.app.ui import diagram_editor_header
+    monkeypatch.setattr(diagram_editor_header, "QSettings", lambda *args:
+                        QSettings(str(tmp_path / "header.ini"), QSettings.IniFormat))
+    plant = diagram_editor_header.DiagramEditorHeader("plantuml", "main")
+    qtbot.addWidget(plant)
+    plant.header_toggle.click()
+    mermaid = diagram_editor_header.DiagramEditorHeader("mermaid", "main")
+    qtbot.addWidget(mermaid)
+    assert not mermaid.header_toggle.isChecked()
+    reopened_plant = diagram_editor_header.DiagramEditorHeader("plantuml", "main")
+    qtbot.addWidget(reopened_plant)
+    assert reopened_plant.header_toggle.isChecked()

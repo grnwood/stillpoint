@@ -901,6 +901,9 @@ def _enable_faulthandler_log() -> None:
 
 def main() -> None:
     _enable_faulthandler_log()
+    if len(sys.argv) >= 2 and sys.argv[1] == "--companion":
+        from sp.app.companion_process import main as companion_main
+        raise SystemExit(companion_main(sys.argv[1:]))
     if len(sys.argv) >= 2 and sys.argv[1] == "--folder-navigator":
         from sp.app.folder_navigator.window import main as folder_navigator_main
         raise SystemExit(folder_navigator_main(sys.argv[2:]))
