@@ -1027,18 +1027,16 @@ class PlantUMLEditorWindow(QMainWindow):
         from .diagram_editor_header import DiagramEditorHeader
         self.header_controls = DiagramEditorHeader("plantuml", settings_scope, self)
         
-        # Create toolbar with zoom buttons and export
-        toolbar_layout = QHBoxLayout()
-        toolbar_layout.setContentsMargins(5, 5, 5, 5)
-        
-        # Editor section with Save button
+        # Persistent Save action and controls belonging to the code pane.
         editor_section = QHBoxLayout()
+        editor_section.setContentsMargins(5, 5, 5, 5)
         
         self.save_btn = QToolButton()
-        self.save_btn.setText("💾 Save")
+        self.save_btn.setText("Save")
+        self.save_btn.setAccessibleName("Save diagram")
         self.save_btn.setToolTip("Save file (Ctrl+S or Ctrl+Enter)")
         self.save_btn.clicked.connect(self._save_file)
-        editor_section.addWidget(self.save_btn)
+        self.header_controls.add_action(self.save_btn, "save.svg")
         
         # Editor zoom controls
         editor_zoom_label = QLabel("Zoom:")
@@ -1076,11 +1074,11 @@ class PlantUMLEditorWindow(QMainWindow):
         editor_section.addWidget(self.render_status_label)
         self._update_render_status_label()
         
-        toolbar_layout.addLayout(editor_section)
-        toolbar_layout.addStretch()
+        editor_section.addStretch()
         
-        # Preview section with zoom and export (right-aligned)
+        # Preview controls stay at the right end of the top row.
         preview_section = QHBoxLayout()
+        preview_section.setContentsMargins(5, 0, 5, 0)
         
         # Render button
         self.render_btn = QToolButton()
@@ -1106,6 +1104,12 @@ class PlantUMLEditorWindow(QMainWindow):
         self.preview_zoom_in_btn.setToolTip("Zoom in preview")
         self.preview_zoom_in_btn.clicked.connect(self._zoom_in_preview)
         preview_section.addWidget(self.preview_zoom_in_btn)
+
+        self.preview_fit_btn = QToolButton()
+        self.preview_fit_btn.setText("Fit")
+        self.preview_fit_btn.setToolTip("Fit preview to window")
+        self.preview_fit_btn.clicked.connect(self._reset_preview_view)
+        preview_section.addWidget(self.preview_fit_btn)
         
         preview_section.addSpacing(10)
         
@@ -1115,10 +1119,7 @@ class PlantUMLEditorWindow(QMainWindow):
         self.export_btn.setToolTip("Export diagram as SVG or PNG")
         self.export_btn.clicked.connect(self._show_export_menu)
         preview_section.addWidget(self.export_btn)
-        
-        toolbar_layout.addLayout(preview_section)
-        
-        self.header_controls.add_row(toolbar_layout)
+        self.header_controls.add_preview_controls(preview_section)
         
         # Create center widget with shortcuts dropdown above split view
         center_widget = QWidget()
@@ -1192,7 +1193,12 @@ class PlantUMLEditorWindow(QMainWindow):
         self.editor.setFont(self._get_monospace_font())
         self._editor_base_point_size = self.editor.font().pointSize()
         style_diagram_code_editor(self.editor, "plantuml_editor", "plantuml")
-        main_h_splitter.addWidget(self.editor)
+        editor_container = QWidget()
+        editor_layout = QVBoxLayout(editor_container)
+        editor_layout.setContentsMargins(0, 0, 0, 0)
+        editor_layout.addLayout(editor_section)
+        editor_layout.addWidget(self.editor, 1)
+        main_h_splitter.addWidget(editor_container)
         
         # RIGHT: Vertical splitter with Preview (top) and Chat (bottom)
         right_v_splitter = QSplitter(Qt.Vertical)
@@ -1219,10 +1225,14 @@ class PlantUMLEditorWindow(QMainWindow):
         self.preview_label.customContextMenuRequested.connect(self._show_preview_context_menu)
         self.preview_scroll.setWidget(self.preview_label)
         
-        preview_layout.addWidget(self.preview_scroll)
+        preview_surface = QWidget()
+        preview_surface_layout = QVBoxLayout(preview_surface)
+        preview_surface_layout.setContentsMargins(0, 0, 0, 0)
+        preview_surface_layout.addWidget(self.preview_scroll)
+        preview_layout.addWidget(preview_surface, 1)
         
         # Loading overlay
-        self.loading_overlay = self._create_loading_overlay(preview_container)
+        self.loading_overlay = self._create_loading_overlay(preview_surface)
         self.loading_overlay.hide()
         
         preview_container.setLayout(preview_layout)
@@ -2597,9 +2607,10 @@ B --> A: response
             return
         
         # Apply zoom
-        zoom_factor = 1.0 + (self.preview_zoom_level * 0.1)
+        zoom_factor = max(0.01, 1.0 + (self.preview_zoom_level * 0.1))
+        zoom_factor *= getattr(self, "_preview_fit_scale", 1.0)
         size = self.preview_pixmap.size()
-        new_size = QSize(int(size.width() * zoom_factor), int(size.height() * zoom_factor))
+        new_size = QSize(max(1, int(size.width() * zoom_factor)), max(1, int(size.height() * zoom_factor)))
         
         scaled_pixmap = self.preview_pixmap.scaledToWidth(
             new_size.width(),
@@ -2642,6 +2653,21 @@ B --> A: response
                 pass
             if hasattr(self, "_geom_timer"):
                 self._geom_timer.start()
+
+    def _reset_preview_view(self) -> None:
+        """Fit the diagram inside the preview viewport."""
+        if not self.preview_pixmap or self.preview_pixmap.isNull():
+            return
+        viewport = self.preview_scroll.viewport().size()
+        image = self.preview_pixmap.size()
+        self._preview_fit_scale = min(
+            max(1, viewport.width() - 4) / image.width(),
+            max(1, viewport.height() - 4) / image.height(),
+        )
+        self.preview_zoom_level = 0
+        self._update_preview_display()
+        self.preview_scroll.horizontalScrollBar().setValue(0)
+        self.preview_scroll.verticalScrollBar().setValue(0)
 
     def _zoom_in_preview(self) -> None:
         """Zoom in preview image."""

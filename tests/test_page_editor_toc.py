@@ -13,6 +13,8 @@ def page_editor(qtbot, monkeypatch):
     monkeypatch.setattr(PageEditorWindow, "_load_content", lambda self: None)
     monkeypatch.setattr(config, "load_toc_widget_enabled", lambda: True)
     monkeypatch.setattr(config, "load_page_editor_toc_widget_enabled", lambda: True)
+    monkeypatch.setattr(config, "load_page_editor_toc_collapsed", lambda: False)
+    monkeypatch.setattr(config, "load_page_editor_reading_view", lambda: False)
     monkeypatch.setattr(config, "load_vault_accent_color", lambda: "#60a5fa")
     window = PageEditorWindow(
         api_base="http://127.0.0.1:1", vault_root="/tmp/vault", page_path="/Page/Page.md",

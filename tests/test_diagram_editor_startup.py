@@ -184,6 +184,12 @@ def test_plantuml_scaled_preview_expands_scrollable_canvas(
 
     assert window.preview_scroll.horizontalScrollBar().value() > old_horizontal
     assert window.preview_scroll.verticalScrollBar().value() > old_vertical
+    window.preview_fit_btn.click()
+    qapp.processEvents()
+    fitted = window.preview_label.pixmap().size()
+    viewport = window.preview_scroll.viewport().size()
+    assert fitted.width() <= viewport.width()
+    assert fitted.height() <= viewport.height()
     window.close()
 
 
@@ -1487,20 +1493,34 @@ def test_diagram_header_and_code_rail_persist_independently(
     assert first.editor_preview_splitter.widget(0).isVisible()
     assert not controls.header_toggle.icon().isNull()
     assert not controls.code_toggle.icon().isNull()
+    assert not first.save_btn.icon().isNull()
+    assert not controls.content.isAncestorOf(first.save_btn)
+    code_panel = first.editor_preview_splitter.widget(0)
+    for widget in (first.editor_zoom_out_btn, first.editor_zoom_in_btn, first.auto_render_checkbox):
+        assert code_panel.isAncestorOf(widget)
     assert not controls.isAncestorOf(controls.code_toggle)
     assert controls.code_toggle.parentWidget() is first.editor_preview_splitter.parentWidget()
     assert controls.code_toggle.y() == first.editor_preview_splitter.y()
     QTest.mouseClick(controls.code_toggle, Qt.LeftButton)
     assert first.editor_preview_splitter.widget(0).isHidden()
     assert controls.content.isVisible()
+    assert first.save_btn.isVisible()
     QTest.mouseClick(controls.header_toggle, Qt.LeftButton)
     assert controls.content.isHidden()
     assert first.ai_panel.isHidden()
     assert controls.header_toggle.isVisible()
     assert controls.code_toggle.isVisible()
+    for widget in (first.save_btn, first.preview_zoom_out_btn, first.preview_zoom_in_btn, first.preview_fit_btn):
+        assert widget.isVisible()
+    first.editor.setPlainText(content + "\n")
+    QTest.mouseClick(first.save_btn, Qt.LeftButton)
+    assert source.read_text() == content + "\n"
     assert controls.code_toggle.y() == first.editor_preview_splitter.y()
     _wait_for(qapp, lambda: controls.height() <= max(controls.header_toggle.height(), controls.code_toggle.height()))
     assert controls.header_toggle.x() == 0
+    assert first.export_btn.parentWidget() is controls
+    assert first.export_btn.geometry().right() == controls.width() - 6
+    assert first.preview_fit_btn.geometry().top() < first.save_btn.geometry().bottom()
     first.close()
 
     second = open_editor()
@@ -1520,6 +1540,8 @@ def test_diagram_header_and_code_rail_persist_independently(
     second.header_controls.code_toggle.click()
     qapp.processEvents()
     assert second.editor_preview_splitter.widget(0).isVisible()
+    for widget in (second.editor_zoom_out_btn, second.editor_zoom_in_btn, second.auto_render_checkbox):
+        assert widget.isVisible()
     assert all(size > 0 for size in second.editor_preview_splitter.sizes())
     second.close()
     third = open_editor()

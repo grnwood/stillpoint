@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from PySide6.QtCore import Qt, QUrl, QSize, QMimeData, Signal, QEvent
+from PySide6.QtCore import Qt, QUrl, QSize, QMimeData, Signal, QEvent, QSignalBlocker, QTimer, QSettings
 from PySide6.QtGui import QIcon, QDesktopServices, QDrag, QPainter, QPixmap, QPalette
 from PySide6.QtWidgets import (
     QApplication,
@@ -21,8 +21,10 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
-    QListWidget,
-    QListWidgetItem,
+    QAbstractItemView,
+    QTableWidget,
+    QTableWidgetItem,
+    QHeaderView,
     QToolButton,
     QFileDialog,
     QFileIconProvider,
@@ -30,22 +32,146 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QDialog,
     QMessageBox,
+    QLineEdit,
+    QComboBox,
+    QLabel,
 )
 
 from .page_load_logger import PAGE_LOGGING_ENABLED
 from .theme import apply_menu_theme
 from .canvas_navigation import install_primary_wheel_zoom
 from .diagram_editor_icons import get_diagram_editor_icon
+from .attachment_thumbnails import ThumbnailLoader, ThumbnailSource
 from sp.app.external_launch import open_path_in_system
 from sp.logging_flags import log_enabled
 
 _DETAILED_LOGGING = log_enabled("attachments_media")
+_GROUP_ROLE = Qt.UserRole + 1
+_SIZE_ROLE = Qt.UserRole + 2
+_TYPE_ROLE = Qt.UserRole + 3
+_SORT_ROLE = Qt.UserRole + 4
+_THUMB_SOURCE_ROLE = Qt.UserRole + 5
+_THUMB_KEY_ROLE = Qt.UserRole + 6
+_FILE_ICON_ROLE = Qt.UserRole + 7
+_ATTACHMENT_TYPES = {
+    "Images": {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".tif", ".tiff", ".ico", ".heic", ".avif"},
+    "Diagrams": {".puml", ".plantuml", ".mmd", ".mermaid", ".excalidraw", ".drawio", ".dot"},
+    "Documents": {".pdf", ".txt", ".md", ".markdown", ".doc", ".docx", ".odt", ".rtf", ".xls", ".xlsx", ".ods", ".csv", ".tsv", ".ppt", ".pptx", ".odp", ".epub"},
+    "Audio": {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".aiff", ".opus"},
+    "Video": {".mp4", ".mov", ".webm", ".avi", ".mkv", ".m4v", ".wmv"},
+    "Archives": {".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar", ".tgz"},
+    "Other": set(),
+}
 
 
-class AttachmentsListWidget(QListWidget):
-    """Custom list widget that provides proper drag data for file attachments."""
+def _attachment_type(path: str) -> str:
+    suffix = Path(path).suffix.casefold()
+    return next((name for name, suffixes in _ATTACHMENT_TYPES.items() if suffix in suffixes), "Other")
+
+
+def _item_path(item) -> str:
+    data = item.data(Qt.UserRole)
+    return str(data.get("path", "")) if isinstance(data, dict) else str(data or "")
+
+
+def _format_size(size: int | None) -> str:
+    if size is None:
+        return "—"
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1024 or unit == "TB":
+            return f"{int(value)} B" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+
+
+class AttachmentTableItem(QTableWidgetItem):
+    def setHidden(self, hidden):
+        self.tableWidget().setRowHidden(self.row(), hidden)
+
+    def isHidden(self):
+        return self.tableWidget().isRowHidden(self.row())
+
+    def __lt__(self, other):
+        table = self.tableWidget()
+        if table.grouped:
+            groups = list(_ATTACHMENT_TYPES)
+            left = (groups.index(self.data(_TYPE_ROLE)), not bool(self.data(_GROUP_ROLE)))
+            right = (groups.index(other.data(_TYPE_ROLE)), not bool(other.data(_GROUP_ROLE)))
+            if left != right:
+                # Keep headings before their files and groups in the same order
+                # while sorting the files within each group in either direction.
+                return left < right if table.horizontalHeader().sortIndicatorOrder() == Qt.AscendingOrder else left > right
+        return self.data(_SORT_ROLE) < other.data(_SORT_ROLE)
+
+
+class AttachmentsListWidget(QTableWidget):
+    """Attachment details table with row-based file actions and drag data."""
 
     deleteRequested = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(0, 3, parent)
+        self.grouped = False
+        self.setHorizontalHeaderLabels(["Filename", "Type", "Size"])
+        self.verticalHeader().hide()
+        self.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.horizontalHeader().setMinimumSectionSize(40)
+        self.setColumnWidth(1, 75)
+        self.setColumnWidth(2, 75)
+        self.setShowGrid(False)
+        self.setWordWrap(False)
+        self.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.sortItems(0, Qt.AscendingOrder)
+        self.setSortingEnabled(True)
+
+    # Keep file actions independent of the number of displayed detail columns.
+    def count(self):
+        return self.rowCount()
+
+    def clear(self):
+        self.setRowCount(0)
+
+    def item(self, row, column=0):
+        return super().item(row, column)
+
+    def selectedItems(self):
+        return [self.item(row) for row in sorted({index.row() for index in self.selectedIndexes()})]
+
+    def setCurrentRow(self, row):
+        self.setCurrentCell(row, 0)
+
+    def takeItem(self, row, column=None):
+        if column is not None:
+            return super().takeItem(row, column)
+        item = super().takeItem(row, 0)
+        self.removeRow(row)
+        return item
+
+    def addItem(self, item):
+        sorting = self.isSortingEnabled()
+        self.setSortingEnabled(False)
+        row = self.rowCount()
+        self.insertRow(row)
+        path = _item_path(item)
+        group = item.data(_GROUP_ROLE) or _attachment_type(path)
+        suffix = Path(path).suffix.lstrip(".").upper()
+        type_name = {"MMD": "Mermaid", "MERMAID": "Mermaid", "PUML": "PlantUML", "PLANTUML": "PlantUML",
+                     "EXCALIDRAW": "Excalidraw"}.get(suffix, suffix or "File")
+        size = item.data(_SIZE_ROLE)
+        cells = [item, AttachmentTableItem(type_name if path else ""),
+                 AttachmentTableItem(_format_size(size) if path else "")]
+        for column, cell in enumerate(cells):
+            cell.setData(Qt.UserRole, item.data(Qt.UserRole))
+            cell.setData(_TYPE_ROLE, group)
+            cell.setData(_GROUP_ROLE, item.data(_GROUP_ROLE))
+            cell.setData(_SORT_ROLE, (size if size is not None else -1) if column == 2 else cell.text().casefold())
+            cell.setFlags(item.flags())
+            self.setItem(row, column, cell)
+        cells[2].setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.setRowHeight(row, max(self.fontMetrics().height() + 10, self.iconSize().height() + 6)
+                          if path else self.fontMetrics().height() + 12)
+        self.setSortingEnabled(sorting)
 
     def keyPressEvent(self, event):  # type: ignore[override]
         delete_key = event.key() == Qt.Key_Delete or (
@@ -62,9 +188,11 @@ class AttachmentsListWidget(QListWidget):
         mime = QMimeData()
         urls = []
         
+        seen = set()
         for item in items:
             file_path_str = item.data(Qt.UserRole)
-            if file_path_str:
+            if isinstance(file_path_str, str) and file_path_str and file_path_str not in seen:
+                seen.add(file_path_str)
                 url = QUrl.fromLocalFile(file_path_str)
                 urls.append(url)
         
@@ -86,7 +214,7 @@ class AttachmentsPanel(QWidget):
     # Signal emitted when local attachment files changed on disk.
     attachmentsModified = Signal(str)
     # Emitted only after the current page's attachment listing completed.
-    countReady = Signal(object, int)  # page path, definitive visible file count
+    countReady = Signal(object, int)  # page path, file count before filename/type filters
     hiddenFilesVisibilityChanged = Signal(bool)
 
     def __init__(
@@ -109,6 +237,18 @@ class AttachmentsPanel(QWidget):
         self.current_page_path: Optional[Path] = None
         self.zoom_level = 0  # 0=list, 1=small icons, 2=medium icons, 3=large icons
         self._show_hidden_files = False
+        self._thumbnail_settings = QSettings("StillPoint", "StillPoint")
+        self._show_thumbnails = self._thumbnail_settings.value("attachments/showThumbnails", False, type=bool)
+        self._thumbnail_loader = ThumbnailLoader(self)
+        self._thumbnail_loader.ready.connect(self._thumbnail_ready)
+        self._thumbnail_timer = QTimer(self)
+        self._thumbnail_timer.setSingleShot(True)
+        self._thumbnail_timer.setInterval(250)
+        self._thumbnail_timer.timeout.connect(self._load_visible_thumbnails)
+        self._cached_thumbnail_timer = QTimer(self)
+        self._cached_thumbnail_timer.setSingleShot(True)
+        self._cached_thumbnail_timer.setInterval(0)
+        self._cached_thumbnail_timer.timeout.connect(lambda: self._load_visible_thumbnails(cached_only=True))
         self.icon_provider = QFileIconProvider()
         
         # Create toolbar with folder, refresh, and zoom buttons
@@ -138,7 +278,8 @@ class AttachmentsPanel(QWidget):
             self.open_folder_button.setIcon(folder_icon)
         else:
             self.open_folder_button.setText("📁")
-        self.open_folder_button.setToolTip("Open folder in file manager")
+        self.open_folder_button.setToolTip("Open containing folder")
+        self.open_folder_button.setAccessibleName("Open containing folder")
         self.open_folder_button.clicked.connect(self._open_folder)
         self.open_folder_button.setEnabled(False)
         toolbar.addWidget(self.open_folder_button)
@@ -151,6 +292,15 @@ class AttachmentsPanel(QWidget):
         toolbar.addWidget(self.refresh_button)
         
         toolbar.addStretch()
+
+        self.thumbnails_button = QToolButton()
+        self.thumbnails_button.setCheckable(True)
+        self.thumbnails_button.setAccessibleName("Show image thumbnails")
+        self.thumbnails_button.setIconSize(QSize(18, 18))
+        self.thumbnails_button.setChecked(self._show_thumbnails)
+        self.thumbnails_button.toggled.connect(self._toggle_thumbnails)
+        self._update_thumbnails_icon()
+        toolbar.addWidget(self.thumbnails_button)
 
         self.hidden_files_button = QToolButton()
         self.hidden_files_button.setCheckable(True)
@@ -176,19 +326,57 @@ class AttachmentsPanel(QWidget):
         
         # Create list widget for attachments
         self.attachments_list = AttachmentsListWidget()
-        self.attachments_list.setSelectionMode(QListWidget.ExtendedSelection)
+        self.attachments_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.attachments_list.deleteRequested.connect(self._remove_selected_attachments)
         self.attachments_list.itemDoubleClicked.connect(self._open_attachment)
         self.attachments_list.setDragEnabled(True)
-        self.attachments_list.setDragDropMode(QListWidget.DragOnly)
+        self.attachments_list.setDragDropMode(QAbstractItemView.DragOnly)
         self.attachments_list.itemSelectionChanged.connect(self._update_remove_button_state)
         self.attachments_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.attachments_list.customContextMenuRequested.connect(self._on_attachments_context_menu)
+        self.attachments_list.viewport().installEventFilter(self)
+        self.attachments_list.installEventFilter(self)
+        self.attachments_list.verticalScrollBar().valueChanged.connect(self._schedule_thumbnails)
+
+        filters = QHBoxLayout()
+        filters.setContentsMargins(5, 0, 5, 0)
+        self.filename_filter = QLineEdit()
+        self.filename_filter.setPlaceholderText("Filter filenames…")
+        self.filename_filter.setAccessibleName("Filter attachments by filename")
+        self.filename_filter.setClearButtonEnabled(True)
+        self.filename_filter.setMinimumWidth(0)
+        self.filename_filter.textChanged.connect(self._apply_filters)
+        filters.addWidget(self.filename_filter, 1)
+
+        self.type_filter = QComboBox()
+        self.type_filter.setAccessibleName("Filter attachments by file type")
+        self.type_filter.addItem("All types", "")
+        for name in _ATTACHMENT_TYPES:
+            self.type_filter.addItem(name, name)
+        self.type_filter.currentIndexChanged.connect(self._apply_filters)
+        filters.addWidget(self.type_filter)
+
+        self.group_button = QToolButton()
+        self.group_button.setText("Group by type")
+        self.group_button.setCheckable(True)
+        self.group_button.setToolTip("Group attachments by file type")
+        self.group_button.setAccessibleName("Group attachments by file type")
+        self.group_button.toggled.connect(self._regroup_attachments)
+        filters.addWidget(self.group_button)
+
+        self.empty_label = QLabel("No attachments.")
+        self.empty_label.setContentsMargins(8, 4, 8, 4)
+        self.empty_label.setWordWrap(True)
+        self.attachments_list.horizontalHeader().sortIndicatorChanged.connect(
+            lambda *_: QTimer.singleShot(0, self._apply_filters)
+        )
         
         # Layout
         layout = QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addLayout(toolbar)
+        layout.addLayout(filters)
+        layout.addWidget(self.empty_label)
         layout.addWidget(self.attachments_list)
         self.setLayout(layout)
         install_primary_wheel_zoom(
@@ -243,6 +431,8 @@ class AttachmentsPanel(QWidget):
         """Refresh the list of attachments for the current page."""
         t0 = time.perf_counter()
         self.attachments_list.clear()
+        self.empty_label.setText("No attachments.")
+        self.empty_label.show()
 
         if self._remote_mode:
             self._refresh_remote_attachments(t0)
@@ -291,14 +481,24 @@ class AttachmentsPanel(QWidget):
                     print(f"[Attachments] Checking file: {file_path}")
                 if file_path.is_file() and file_path != self.current_page_path:
                     attachments.append(file_path)
-                    item = QListWidgetItem()
+                    item = AttachmentTableItem()
                     item.setData(Qt.UserRole, str(file_path))
+                    try:
+                        stat = file_path.stat()
+                        item.setData(_SIZE_ROLE, stat.st_size)
+                        if _attachment_type(str(file_path)) == "Images":
+                            item.setData(_THUMB_SOURCE_ROLE, ThumbnailSource(
+                                str(file_path.resolve()), f"{stat.st_mtime_ns}:{stat.st_size}", path=file_path,
+                            ))
+                    except OSError:
+                        pass
 
                     # Set icon based on view mode
                     item.setText(file_path.name if self.zoom_level > 0 else file_path.name)
                     icon = self._get_file_icon(file_path)
                     if icon:
                         item.setIcon(icon)
+                        item.setData(_FILE_ICON_ROLE, icon)
 
                     self.attachments_list.addItem(item)
             #if PAGE_LOGGING_ENABLED:
@@ -308,7 +508,7 @@ class AttachmentsPanel(QWidget):
         except (OSError, PermissionError):
             pass
         else:
-            self._apply_hidden_files_filter()
+            self._regroup_attachments()
             #if PAGE_LOGGING_ENABLED:
                 #print(f"[PageLoadAndRender] attachments refresh total={(time.perf_counter()-t0)*1000:.1f}ms")
             self._sync_with_server(attachments)
@@ -351,7 +551,9 @@ class AttachmentsPanel(QWidget):
             attachment_path = entry.get("attachment_path") or entry.get("stored_path")
             if not attachment_path:
                 continue
-            item = QListWidgetItem()
+            item = AttachmentTableItem()
+            size = entry.get("size_bytes")
+            item.setData(_SIZE_ROLE, size if isinstance(size, int) and size >= 0 else None)
             name = Path(str(attachment_path)).name
             label = name
             cache_root = self._get_remote_cache_root()
@@ -363,11 +565,22 @@ class AttachmentsPanel(QWidget):
                     label = f"{name} (remote)"
             item.setText(label)
             item.setData(Qt.UserRole, {"kind": "remote", "path": str(attachment_path)})
+            if _attachment_type(str(attachment_path)) == "Images":
+                revision = entry.get("mtime_ns")
+                if revision is None:
+                    revision = entry.get("updated")
+                if revision is None:
+                    revision = time.time_ns()  # Older servers cannot validate a persistent cache entry.
+                item.setData(_THUMB_SOURCE_ROLE, ThumbnailSource(
+                    f"{self._api_base}\0{attachment_path}", f"{revision}:{size}",
+                    client=self._http_client, remote_path=str(attachment_path),
+                ))
             icon = self._get_file_icon(Path(str(attachment_path)))
             if icon:
                 item.setIcon(icon)
+                item.setData(_FILE_ICON_ROLE, icon)
             self.attachments_list.addItem(item)
-        self._apply_hidden_files_filter()
+        self._regroup_attachments()
         #if PAGE_LOGGING_ENABLED:
             #print(f"[PageLoadAndRender] attachments refresh remote total={(time.perf_counter()-t0)*1000:.1f}ms")
         self._update_remove_button_state()
@@ -376,27 +589,156 @@ class AttachmentsPanel(QWidget):
         self._show_hidden_files = visible
         self._update_hidden_files_icon()
         self.hiddenFilesVisibilityChanged.emit(visible)
-        self._apply_hidden_files_filter()
+        self._apply_filters()
 
-    def _apply_hidden_files_filter(self) -> None:
-        visible_count = 0
+    def _regroup_attachments(self) -> None:
+        listing = self.attachments_list
+        selected = {_item_path(item) for item in listing.selectedItems()}
+        current = _item_path(listing.currentItem()) if listing.currentItem() else None
+        with QSignalBlocker(listing):
+            listing.setSortingEnabled(False)
+            listing.grouped = self.group_button.isChecked()
+            items = [listing.takeItem(0) for _ in range(listing.count())]
+            files = [item for item in items if _item_path(item)]
+            groups = list(_ATTACHMENT_TYPES)
+            grouped = self.group_button.isChecked()
+            files.sort(key=lambda item: (
+                groups.index(_attachment_type(_item_path(item))) if grouped else 0,
+                Path(_item_path(item)).name.casefold(),
+            ))
+            previous_group = None
+            for item in files:
+                group = _attachment_type(_item_path(item))
+                if grouped and group != previous_group:
+                    header = AttachmentTableItem(group)
+                    header.setData(_GROUP_ROLE, group)
+                    header.setFlags(Qt.ItemIsEnabled)
+                    font = header.font()
+                    font.setBold(True)
+                    header.setFont(font)
+                    header.setSizeHint(QSize(1, self.fontMetrics().height() + 12))
+                    listing.addItem(header)
+                    previous_group = group
+                listing.addItem(item)
+            for item in files:
+                if _item_path(item) == current:
+                    listing.setCurrentItem(item)
+            for item in files:
+                item.setSelected(_item_path(item) in selected)
+            listing.setSortingEnabled(True)
+        self._update_view_mode()
+        self._apply_filters()
+
+    def _apply_filters(self) -> None:
+        query = self.filename_filter.text().strip().casefold()
+        file_type = self.type_filter.currentData()
+        attachment_count = matched_count = 0
+        visible_groups = set()
+        headers = []
         for row in range(self.attachments_list.count()):
             item = self.attachments_list.item(row)
-            data = item.data(Qt.UserRole)
-            path = data.get("path", "") if isinstance(data, dict) else str(data or "")
-            hidden = not self._show_hidden_files and Path(path).name.startswith(".")
+            if item.data(_GROUP_ROLE):
+                headers.append(item)
+                self.attachments_list.setRowHeight(row, self.fontMetrics().height() + 12)
+                continue
+            self.attachments_list.setRowHeight(row, max(self.fontMetrics().height() + 10,
+                                                        self.attachments_list.iconSize().height() + 6))
+            path = _item_path(item)
+            name = Path(path).name
+            group = _attachment_type(path)
+            eligible = self._show_hidden_files or not name.startswith(".")
+            attachment_count += eligible
+            hidden = not (eligible and query in name.casefold() and (not file_type or file_type == group))
             if hidden:
                 item.setSelected(False)
             item.setHidden(hidden)
-            visible_count += not hidden
-        # Keep all files in the list/cache: a visibility toggle must never be
-        # interpreted as deleting an attachment during server reconciliation.
-        self.countReady.emit(self.current_page_path, visible_count)
+            if not hidden:
+                matched_count += 1
+                visible_groups.add(group)
+        for header in headers:
+            header.setHidden(header.data(_GROUP_ROLE) not in visible_groups)
+        self.empty_label.setText("No attachments match these filters." if query or file_type else "No attachments.")
+        self.empty_label.setVisible(matched_count == 0)
+        self._update_remove_button_state()
+        # Keep every file in the list/cache for sync, and keep the page's
+        # attachment indicator independent of temporary filename/type filters.
+        self.countReady.emit(self.current_page_path, attachment_count)
+        self._load_visible_thumbnails(cached_only=True)
+        self._schedule_thumbnails()
+
+    def _toggle_thumbnails(self, enabled: bool) -> None:
+        self._show_thumbnails = enabled
+        self._thumbnail_settings.setValue("attachments/showThumbnails", enabled)
+        self._update_thumbnails_icon()
+        self._thumbnail_timer.stop()
+        self._cached_thumbnail_timer.stop()
+        if not enabled:
+            for row in range(self.attachments_list.count()):
+                item = self.attachments_list.item(row)
+                if item.data(_THUMB_KEY_ROLE):
+                    item.setIcon(item.data(_FILE_ICON_ROLE) or QIcon())
+                    item.setData(_THUMB_KEY_ROLE, None)
+        self._update_view_mode()
+        self._apply_filters()
+
+    def _schedule_thumbnails(self, *_):
+        if self._show_thumbnails and self.isVisible():
+            self._cached_thumbnail_timer.start()
+            self._thumbnail_timer.start()
+
+    def _load_visible_thumbnails(self, *, cached_only=False) -> None:
+        if not self._show_thumbnails or not self.isVisible():
+            return
+        listing = self.attachments_list
+        first = listing.rowAt(0)
+        if first < 0:
+            return
+        last = listing.rowAt(listing.viewport().height() - 1)
+        if last < 0:
+            last = listing.count() - 1
+        for row in range(first, last + 1):
+            item = listing.item(row)
+            source = item.data(_THUMB_SOURCE_ROLE)
+            if item.isHidden() or source is None or not listing.visualItemRect(item).intersects(listing.viewport().rect()):
+                continue
+            if item.data(_THUMB_KEY_ROLE) == source.key:
+                continue
+            image = (self._thumbnail_loader.cached_image(source, include_disk=True) if cached_only
+                     else self._thumbnail_loader.request(source))
+            if image is not None:
+                item.setData(_THUMB_KEY_ROLE, source.key)
+                if not image.isNull():
+                    item.setIcon(QIcon(QPixmap.fromImage(image)))
+
+    def _thumbnail_ready(self, key, image):
+        # Look up the current rows again: the page, sorting, or filters may
+        # have changed while decoding. Never retain a table item in a worker.
+        self._schedule_thumbnails()
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Hide:
+            self._thumbnail_timer.stop()
+            self._cached_thumbnail_timer.stop()
+        elif event.type() in (QEvent.Show, QEvent.Resize, QEvent.MouseButtonPress, QEvent.KeyPress):
+            if event.type() == QEvent.Show:
+                self._load_visible_thumbnails(cached_only=True)
+            self._schedule_thumbnails()
+        return super().eventFilter(watched, event)
+
+    def _update_thumbnails_icon(self):
+        self._set_toolbar_icon(self.thumbnails_button, "show-thumbnails.svg")
+        self.thumbnails_button.setToolTip("Hide image thumbnails" if self._show_thumbnails else "Show image thumbnails")
 
     def _update_hidden_files_icon(self) -> None:
         asset = "open-eye.svg" if self._show_hidden_files else "closed-eye.svg"
+        self._set_toolbar_icon(self.hidden_files_button, asset)
+        self.hidden_files_button.setToolTip(
+            "Hide hidden files" if self._show_hidden_files else "Show hidden files"
+        )
+
+    def _set_toolbar_icon(self, button, asset):
         path = Path(__file__).resolve().parents[2] / "assets" / asset
-        pixmap = QIcon(str(path)).pixmap(self.hidden_files_button.iconSize())
+        pixmap = QIcon(str(path)).pixmap(button.iconSize())
         if not pixmap.isNull():
             tinted = QPixmap(pixmap.size())
             tinted.setDevicePixelRatio(pixmap.devicePixelRatio())
@@ -406,15 +748,13 @@ class AttachmentsPanel(QWidget):
             painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
             painter.fillRect(tinted.rect(), self.palette().color(QPalette.ButtonText))
             painter.end()
-            self.hidden_files_button.setIcon(QIcon(tinted))
-        self.hidden_files_button.setToolTip(
-            "Hide hidden files" if self._show_hidden_files else "Show hidden files"
-        )
+            button.setIcon(QIcon(tinted))
 
     def changeEvent(self, event) -> None:  # type: ignore[override]
         super().changeEvent(event)
         if event.type() == QEvent.PaletteChange and hasattr(self, "hidden_files_button"):
             self._update_hidden_files_icon()
+            self._update_thumbnails_icon()
 
     def _get_remote_cache_root(self) -> Optional[Path]:
         if not self._api_base:
@@ -731,31 +1071,15 @@ class AttachmentsPanel(QWidget):
         return self.icon_provider.icon(QFileInfo(str(file_path)))
     
     def _update_view_mode(self) -> None:
-        """Update the list widget view mode based on zoom level."""
-        if self.zoom_level == 0:
-            # List view
-            self.attachments_list.setViewMode(QListWidget.ListMode)
-            self.attachments_list.setIconSize(QSize(16, 16))
-            self.attachments_list.setGridSize(QSize())
-        else:
-            # Icon view
-            self.attachments_list.setViewMode(QListWidget.IconMode)
-            self.attachments_list.setResizeMode(QListWidget.Adjust)
-            self.attachments_list.setSpacing(10)
-            
-            if self.zoom_level == 1:  # Small
-                self.attachments_list.setIconSize(QSize(48, 48))
-                self.attachments_list.setGridSize(QSize(80, 80))
-            elif self.zoom_level == 2:  # Medium
-                self.attachments_list.setIconSize(QSize(96, 96))
-                self.attachments_list.setGridSize(QSize(128, 128))
-            else:  # Large
-                self.attachments_list.setIconSize(QSize(144, 144))
-                self.attachments_list.setGridSize(QSize(176, 176))
+        """Resize file icons while retaining the sortable detail columns."""
+        size = (16, 48, 96, 144)[self.zoom_level]
+        if self._show_thumbnails:
+            size = max(48, size)
+        self.attachments_list.setIconSize(QSize(size, size))
     
     def _open_folder(self) -> None:
         """Open the attachments folder in the system file manager."""
-        if not self.current_page_path:
+        if self._remote_mode or not self.current_page_path:
             return
         
         page_folder = self.current_page_path.parent
@@ -775,7 +1099,7 @@ class AttachmentsPanel(QWidget):
             self.zoom_level -= 1
             self._refresh_attachments()
     
-    def _open_attachment(self, item: QListWidgetItem) -> None:
+    def _open_attachment(self, item) -> None:
         """Open the selected attachment. Diagram files open in editors, others use default handler."""
         data = item.data(Qt.UserRole)
         mermaid_suffixes = {".mmd", ".mermaid"}
@@ -858,6 +1182,10 @@ class AttachmentsPanel(QWidget):
         delete_action = menu.addAction("Delete")
         delete_action.setEnabled(bool(selected))
         delete_action.triggered.connect(self._remove_selected_attachments)
+
+        folder_action = menu.addAction("Open containing folder")
+        folder_action.setEnabled(self.open_folder_button.isEnabled())
+        folder_action.triggered.connect(self._open_folder)
         
         terminal_action = menu.addAction("Open Terminal Here")
         terminal_action.triggered.connect(self._open_terminal_here)

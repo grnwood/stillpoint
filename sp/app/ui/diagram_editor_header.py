@@ -19,6 +19,7 @@ class DiagramEditorHeader(QWidget):
         self._splitter = None
         self._ai_panel = None
         self._vertical_splitter = None
+        self._action_icons = []
         self._code_sizes = self.settings.value(f"{self.prefix}/codeRailSizes", [400, 600], type=list)
         self._ai_sizes = self.settings.value(f"{self.prefix}/aiPaneSizes", [640, 60], type=list)
         self.content = QWidget(self)
@@ -42,10 +43,22 @@ class DiagramEditorHeader(QWidget):
         self.code_toggle.toggled.connect(self._code_toggled)
         layout.addWidget(self.header_toggle, 0, Qt.AlignLeft | Qt.AlignTop)
         layout.addWidget(self.content, 1)
+        layout.addStretch()
         self._update_icons()
 
     def add_row(self, layout):
         self.content_layout.addLayout(layout)
+
+    def add_action(self, button, asset):
+        """Add an action that remains available with the header rolled up."""
+        button.setIconSize(QSize(18, 18))
+        self.layout().insertWidget(1, button, 0, Qt.AlignLeft | Qt.AlignTop)
+        self._action_icons.append((button, asset))
+        self._set_icon(button, asset)
+
+    def add_preview_controls(self, layout):
+        """Keep preview actions at the right end of the persistent top row."""
+        self.layout().addLayout(layout)
 
     def wrap_code_surface(self, splitter):
         """Keep the code toggle beside the splitter, outside the header."""
@@ -111,6 +124,8 @@ class DiagramEditorHeader(QWidget):
         self._update_icons()
 
     def _update_icons(self):
+        for button, asset in self._action_icons:
+            self._set_icon(button, asset)
         self._set_icon(self.header_toggle, "expand-horiz.svg" if self.header_toggle.isChecked() else "collapse-horiz.svg")
         self.header_toggle.setToolTip("Expand header and AI pane" if self.header_toggle.isChecked()
                                      else "Roll up header and AI pane")

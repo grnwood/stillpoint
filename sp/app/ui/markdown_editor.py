@@ -5687,6 +5687,7 @@ class MarkdownEditor(QTextEdit):
             if self._handle_escape_clear_empty_line():
                 event.accept()
                 return
+            self._move_to_line_start_on_escape()
             self.navigationEscapePressed.emit()
             event.accept()
             return
@@ -8090,8 +8091,15 @@ class MarkdownEditor(QTextEdit):
             return False
         if self._vi_insert_mode:
             self._enter_vi_navigation_mode()
+            self._move_to_line_start_on_escape()
             return True
         return False
+
+    def _move_to_line_start_on_escape(self) -> None:
+        cursor = self.textCursor()
+        cursor.movePosition(QTextCursor.StartOfBlock)
+        self.setTextCursor(cursor)
+        self.ensureCursorVisible()
 
     def _handle_escape_clear_empty_line(self) -> bool:
         if self._read_only_mode:
@@ -8180,8 +8188,7 @@ class MarkdownEditor(QTextEdit):
 
         if self._vi_insert_mode:
             if key == Qt.Key_Escape and not shift:
-                self._enter_vi_navigation_mode()
-                return True
+                return self._handle_vi_escape()
             if read_only:
                 return _block_vi_edit()
             return False
@@ -8210,6 +8217,7 @@ class MarkdownEditor(QTextEdit):
                     return True
             if self._handle_escape_clear_empty_line():
                 return True
+            self._move_to_line_start_on_escape()
             self.viNavigationEscapePressed.emit()
             self.navigationEscapePressed.emit()
             return True

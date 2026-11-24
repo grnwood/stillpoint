@@ -25,14 +25,85 @@ from PySide6.QtWidgets import (
     QTextBrowser,
     QVBoxLayout,
     QWidget,
+    QStackedWidget,
+    QSizePolicy,
 )
 from sp.app import config
 from sp.logging_flags import log_enabled
 from .markdown_editor import HEADING_MARK_PATTERN, HEADING_MAX_LEVEL, MarkdownEditor, heading_level_from_char
+from .markdown_preview import MarkdownReadingView
 from .keyboard_shortcuts import is_vi_navigation_chord
-from .canvas_navigation import native_zoom_steps, wheel_action, zoom_factor
+from .canvas_navigation import native_zoom_steps, wheel_action, zoom_factor, install_primary_wheel_zoom
 from .screen_positioning import popup_available_geometry, clamp_popup_top_left
 from .theme import apply_menu_theme, theme_color, theme_value
+
+
+def _map_note_popup_size(available) -> QSize:
+    return QSize(min(520, max(1, available.width() - 16)), min(320, max(1, available.height() - 16)))
+
+
+def _map_note_popup_style(name: str, palette: QPalette) -> str:
+    base, text = palette.color(QPalette.Base), palette.color(QPalette.Text)
+
+    def blend(amount):
+        return QColor.fromRgbF(*(a * (1 - amount) + b * amount for a, b in zip(
+            (base.redF(), base.greenF(), base.blueF()), (text.redF(), text.greenF(), text.blueF()),
+        ))).name()
+
+    return (
+        f"#{name} {{ background: {base.name()}; border: 2px solid {blend(0.4)}; border-radius: 6px; }}"
+        f"#{name} QTextEdit {{ background: {base.name()}; color: {text.name()}; border: none; }}"
+        f"#{name} QFrame#mapNoteHeader {{ background: {blend(0.12)}; border: none; "
+        f"border-bottom: 1px solid {blend(0.3)}; border-radius: 4px; }}"
+        f"#{name} QLabel#mapNoteTitle {{ color: {text.name()}; font-weight: bold; background: transparent; }}"
+        f"#{name} QLabel#mapNoteMode {{ color: {text.name()}; background: {blend(0.2)}; "
+        "padding: 3px 6px; border-radius: 3px; font-size: 10px; }"
+        f"#{name} QLabel#mapNoteHint {{ color: {blend(0.75)}; font-size: 11px; padding: 3px 2px; }}"
+    )
+
+
+class _MapPopupTitle(QLabel):
+    def set_title(self, title: str):
+        self._full_title = f"Map note · {title}" if title else "Map note"
+        self.setToolTip(self._full_title)
+        self.setAccessibleName(self._full_title)
+        self._elide()
+
+    def _elide(self):
+        self.setText(self.fontMetrics().elidedText(getattr(self, "_full_title", "Map note"), Qt.ElideRight, self.width()))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._elide()
+
+
+class _MapPopupHeader(QFrame):
+    def __init__(self, parent, title, mode):
+        super().__init__(parent)
+        self.setObjectName("mapNoteHeader")
+        self.row = QHBoxLayout(self)
+        self.row.setContentsMargins(8, 6, 8, 6)
+        self.row.setSpacing(6)
+        self.title = _MapPopupTitle(self)
+        self.title.setObjectName("mapNoteTitle")
+        self.title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.title.setMinimumWidth(0)
+        self.title.set_title(title)
+        self.row.addWidget(self.title, 1)
+        self.mode = QLabel(mode, self)
+        self.mode.setObjectName("mapNoteMode")
+        self.row.addWidget(self.mode)
+
+
+def _map_font_button(parent, direction: int) -> QToolButton:
+    button = QToolButton(parent)
+    button.setText("+" if direction > 0 else "−")
+    button.setFixedSize(24, 24)
+    button.setAutoRaise(True)
+    button.setStyleSheet(f"QToolButton {{ color: {parent.palette().color(QPalette.Text).name()}; }}")
+    button.setToolTip("Increase font size" if direction > 0 else "Decrease font size")
+    button.setAccessibleName(button.toolTip())
+    return button
 
 
 class ZoomablePreviewLabel(QLabel):
@@ -168,33 +239,50 @@ class _MapContentTooltip(QFrame):
     dismissed = Signal()
     closeRequested = Signal()
     hoverChanged = Signal(bool)
+    fontZoomRequested = Signal(int)
 
     def __init__(self, parent=None) -> None:
-        super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint)
+        super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
         self.setObjectName("mapContentTooltip")
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setFocusPolicy(Qt.NoFocus)
         self._is_pinned = False
-        self._editor = MarkdownEditor(self)
-        self._editor.set_context(None, None)
-        self._editor.set_read_only_mode(True)
+        self.node_id = None
+        self._source_editor = MarkdownEditor(self)
+        self._source_editor.set_context(None, None)
+        self._source_editor.set_read_only_mode(True)
+        self._source_editor.hide()
+        self.reading_view = MarkdownReadingView(self, preference_scope="map", enable_table_preview=False)
+        self.reading_view.set_header_visible(False)
+        self.reading_view._apply_reading_options(dict(self.reading_view.reading_options, width="full"))
+        self._editor = self.reading_view.browser
         self._editor.setFocusPolicy(Qt.NoFocus)
         self._editor.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self._editor.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._editor.installEventFilter(self)
+        self._editor.viewport().installEventFilter(self)
+        install_primary_wheel_zoom(self._editor, self.fontZoomRequested.emit)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(4)
-        header_row = QHBoxLayout()
-        header_row.setContentsMargins(0, 0, 0, 0)
-        header_row.addStretch(1)
+        self.header = _MapPopupHeader(self, "", "Reading")
+        header_row = self.header.row
+        self._edit_hint = QLabel("Enter / double-click to edit · Esc to close", self)
+        self._edit_hint.setObjectName("mapNoteHint")
+        self._edit_hint.setWordWrap(True)
+        self.font_smaller_button = _map_font_button(self, -1)
+        self.font_larger_button = _map_font_button(self, 1)
+        self.font_smaller_button.clicked.connect(lambda: self.fontZoomRequested.emit(-1))
+        self.font_larger_button.clicked.connect(lambda: self.fontZoomRequested.emit(1))
+        header_row.addWidget(self.font_smaller_button)
+        header_row.addWidget(self.font_larger_button)
         self._close_btn = QToolButton(self)
         self._close_btn.setText("Close")
-        self._close_btn.hide()
         self._close_btn.clicked.connect(self._request_close)
         header_row.addWidget(self._close_btn)
-        layout.addLayout(header_row)
-        layout.addWidget(self._editor)
+        layout.addWidget(self.header)
+        layout.addWidget(self.reading_view, 1)
+        layout.addWidget(self._edit_hint)
         self.closeRequested.connect(self._handle_close_requested)
         self.resize(520, 320)
         self.setStyleSheet(
@@ -211,22 +299,12 @@ class _MapContentTooltip(QFrame):
         self.setPalette(palette)
         self.setAutoFillBackground(True)
         self._editor.setPalette(palette)
+        self.reading_view.set_theme_palette(palette)
         self._editor.setAutoFillBackground(True)
-        bg = palette.color(QPalette.Base).name()
         text = palette.color(QPalette.Text).name()
-        border = palette.color(QPalette.Mid).name()
-        self.setStyleSheet(
-            "#mapContentTooltip {"
-            f"background: {bg};"
-            f"border: 2px solid {border};"
-            "border-radius: 6px;"
-            "}"
-            "#mapContentTooltip QTextEdit {"
-            f"background: {bg};"
-            f"color: {text};"
-            "border: none;"
-            "}"
-        )
+        for button in (self.font_smaller_button, self.font_larger_button):
+            button.setStyleSheet(f"QToolButton {{ color: {text}; }}")
+        self.setStyleSheet(_map_note_popup_style(self.objectName(), palette))
 
     def set_pinned(self, pinned: bool) -> None:
         if pinned == self._is_pinned:
@@ -235,24 +313,16 @@ class _MapContentTooltip(QFrame):
             return
         if log_enabled("ui_state"):
             print(f"[MAP_TOOLTIP] set_pinned pinned={pinned} visible_before={self.isVisible()}")
-        pos = self.pos()
-        self.hide()
-        self.setWindowFlag(Qt.Tool, True)
-        self.setWindowFlag(Qt.FramelessWindowHint, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, not pinned)
         self.setFocusPolicy(Qt.StrongFocus if pinned else Qt.NoFocus)
         self._editor.setFocusPolicy(Qt.StrongFocus if pinned else Qt.NoFocus)
-        self._close_btn.setVisible(pinned)
-        self.move(pos)
         self._is_pinned = pinned
 
-    def set_font_zoom(self, zoom_factor: float) -> None:
-        """Apply zoom factor to the editor font size."""
-        base_font = QApplication.font()
-        zoomed_size = max(8, int(base_font.pointSize() * zoom_factor))
-        font = self._editor.font()
-        font.setPointSize(zoomed_size)
-        self._editor.setFont(font)
+    def set_font_point_size(self, size: int) -> None:
+        if self._source_editor.font().pointSize() == size and self.reading_view._base_font_point_size == size:
+            return
+        self._source_editor.set_font_point_size(size)
+        self.reading_view.refresh_editor_layout(self._source_editor)
 
     def focus_reader(self) -> None:
         self.setFocus(Qt.OtherFocusReason)
@@ -329,14 +399,19 @@ class _MapContentTooltip(QFrame):
         scrollbar.setValue(max(scrollbar.minimum(), old_value - step))
         return scrollbar.value() != old_value
 
-    def show_markdown(self, markdown_text: str, page_path: Optional[str], cursor_pos: QPoint) -> None:
+    def show_markdown(self, markdown_text: str, page_path: Optional[str], cursor_pos: QPoint, *, heading="", node_id=None) -> None:
         if log_enabled("ui_state"):
             print(
                 f"[MAP_TOOLTIP] show_markdown len={len(markdown_text or '')} page={page_path!r} "
                 f"cursor=({cursor_pos.x()},{cursor_pos.y()}) pinned={self._is_pinned}"
             )
-        self._editor.set_context(None, page_path)
-        self._editor.set_markdown(markdown_text)
+        self.node_id = node_id
+        self.header.title.set_title(heading)
+        self._source_editor.set_context(None, page_path)
+        self._source_editor.set_markdown(markdown_text)
+        self.reading_view.match_editor_layout(self._source_editor)
+        self.reading_view.set_vi_enabled(config.load_vi_mode_enabled())
+        self.reading_view.set_markdown(markdown_text)
         try:
             self._editor.document().setModified(False)
         except Exception:
@@ -345,10 +420,10 @@ class _MapContentTooltip(QFrame):
         self.show()
         self.raise_()
         # Smart placement: keep the popup fully within the screen.
-        tip_w = self.width()
-        tip_h = self.height()
         gap = 16
         avail = popup_available_geometry(anchor=cursor_pos, parent=self)
+        self.resize(_map_note_popup_size(avail))
+        tip_w, tip_h = self.width(), self.height()
         # Prefer right of cursor, flip left if it would be clipped.
         if cursor_pos.x() + gap + tip_w <= avail.right():
             x = cursor_pos.x() + gap
@@ -360,7 +435,7 @@ class _MapContentTooltip(QFrame):
         else:
             y = cursor_pos.y() - gap - tip_h
         # Final clamp so we never go off-screen on any edge.
-        self.move(clamp_popup_top_left(QPoint(x, y), QSize(tip_w, tip_h), avail))
+        self.move(clamp_popup_top_left(QPoint(x, y), QSize(tip_w, tip_h), avail, margin=8))
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         if event.button() == Qt.LeftButton:
@@ -378,6 +453,16 @@ class _MapContentTooltip(QFrame):
         super().leaveEvent(event)
 
     def eventFilter(self, obj, event) -> bool:  # type: ignore[override]
+        if (obj is self._editor.viewport() and event.type() == QEvent.MouseButtonPress
+                and event.button() == Qt.LeftButton and not self._is_pinned):
+            self.pinRequested.emit()
+        if (obj is self._editor.viewport() and event.type() == QEvent.MouseButtonDblClick
+                and event.button() == Qt.LeftButton):
+            parent = self.parentWidget()
+            if isinstance(parent, MapPanel):
+                parent._edit_selected_body(start_insert=True)
+                event.accept()
+                return True
         if obj is self._editor and event.type() == QEvent.ShortcutOverride:
             parent = self.parentWidget()
             if isinstance(parent, MapPanel) and parent._selected_note_popup_active:
@@ -522,16 +607,32 @@ class _MapBodyEditDialog(QDialog):
     saveRequested = Signal()
 
     def __init__(self, parent: QWidget, heading: str, body: str) -> None:
-        super().__init__(parent, Qt.Tool)
+        super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
+        self.setObjectName("mapBodyEditor")
+        palette = parent._content_tooltip.palette()
+        self.setPalette(palette)
+        self.setStyleSheet(_map_note_popup_style(self.objectName(), palette))
+        self._read_font_size = parent._read_font_size
+        self._edit_font_size = parent._edit_font_size
         self.setWindowTitle(f"Edit content — {heading}")
         self.setAttribute(Qt.WA_DeleteOnClose)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(4)
         vi = config.load_vi_mode_enabled()
-        hint = QLabel("Ctrl+Enter saves · " + ("Vi: i edits · Esc exits insert, then cancels" if vi else "Esc cancels") + " · Click outside cancels")
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
+        self._edit_hint = "Ctrl/Cmd+Space previews · Ctrl+Enter saves · " + ("Vi: i edits · Esc exits insert, then cancels" if vi else "Esc cancels") + " · Click outside cancels"
+        self.hint = QLabel(self._edit_hint)
+        self.hint.setObjectName("mapNoteHint")
+        self.hint.setWordWrap(True)
+        self.header = _MapPopupHeader(self, heading, "Editing")
+        header = self.header.row
+        self.font_smaller_button = _map_font_button(self, -1)
+        self.font_larger_button = _map_font_button(self, 1)
+        self.font_smaller_button.clicked.connect(lambda: self._change_font_size(-1))
+        self.font_larger_button.clicked.connect(lambda: self._change_font_size(1))
+        header.addWidget(self.font_smaller_button)
+        header.addWidget(self.font_larger_button)
+        layout.addWidget(self.header)
         self.editor = MarkdownEditor(self)
         self.editor.set_context(None, getattr(parent, "_current_page_path", None))
         self.editor.set_page_navigation_enabled(False)
@@ -543,12 +644,32 @@ class _MapBodyEditDialog(QDialog):
         if not body:
             self.editor.clear()
         self.editor.installEventFilter(self)
-        layout.addWidget(self.editor, 1)
+        self.reading_view = MarkdownReadingView(self, preference_scope="map", enable_table_preview=False)
+        self.reading_view.set_header_visible(False)
+        self.reading_view.set_theme_palette(palette)
+        self.reading_view._apply_reading_options(dict(self.reading_view.reading_options, width="full"))
+        self.reading_view.browser.installEventFilter(self)
+        self.reading_view.browser.viewport().installEventFilter(self)
+        self._reading_view_enabled = False
+        install_primary_wheel_zoom(self.editor, self._change_font_size)
+        install_primary_wheel_zoom(self.reading_view.browser, self._change_font_size)
+        self._stack = QStackedWidget(self)
+        self._stack.addWidget(self.editor)
+        self._stack.addWidget(self.reading_view)
+        self.editor.set_font_point_size(self._edit_font_size)
+        layout.addWidget(self._stack, 1)
         self.error_label = QLabel()
         self.error_label.setWordWrap(True)
         self.error_label.hide()
         layout.addWidget(self.error_label)
+        layout.addWidget(self.hint)
         buttons = QHBoxLayout()
+        self.reading_toggle = QToolButton()
+        self.reading_toggle.setText("Read")
+        self.reading_toggle.setCheckable(True)
+        self.reading_toggle.setToolTip("Toggle reading/editing (Ctrl/Cmd+Space)")
+        self.reading_toggle.toggled.connect(self.set_reading_view)
+        buttons.addWidget(self.reading_toggle)
         buttons.addStretch()
         cancel = QPushButton("Cancel")
         cancel.setAutoDefault(False)
@@ -562,8 +683,44 @@ class _MapBodyEditDialog(QDialog):
         for sequence in ("Ctrl+Return", "Ctrl+Enter"):
             shortcut = QShortcut(QKeySequence(sequence), self)
             shortcut.activated.connect(self.saveRequested.emit)
+        for sequence in ("Ctrl+Space", "Meta+Space"):
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.activated.connect(self.reading_toggle.toggle)
+
+    def set_reading_view(self, enabled: bool) -> None:
+        self._reading_view_enabled = enabled
+        self.header.mode.setText("Reading" if enabled else "Editing")
+        if enabled:
+            self.reading_view.match_editor_layout(self.editor)
+            self.reading_view.set_base_font_point_size(self._read_font_size)
+            self.reading_view.set_vi_enabled(config.load_vi_mode_enabled())
+            self.reading_view.set_markdown(self.editor.to_markdown())
+        self._stack.setCurrentWidget(self.reading_view if enabled else self.editor)
+        self.reading_toggle.blockSignals(True)
+        self.reading_toggle.setChecked(enabled)
+        self.reading_toggle.blockSignals(False)
+        self.hint.setText("Enter or double-click edits · Ctrl/Cmd+Space toggles editing · Esc cancels" if enabled else self._edit_hint)
+        if not enabled and self.editor._vi_feature_enabled:
+            self.editor._enter_vi_insert_mode()
+        (self.reading_view.browser if enabled else self.editor).setFocus(Qt.OtherFocusReason)
+
+    def _change_font_size(self, delta: int) -> None:
+        self.parentWidget()._change_map_font_size(delta, reading=self._reading_view_enabled)
+
+    def apply_font_sizes(self, reading: int, editing: int) -> None:
+        self._read_font_size, self._edit_font_size = reading, editing
+        self.editor.set_font_point_size(editing)
+        if self._reading_view_enabled:
+            line, screen_y = self.reading_view.reading_view_position()
+            self.reading_view.match_editor_layout(self.editor)
+            self.reading_view.set_base_font_point_size(reading)
+            self.reading_view.set_markdown(self.editor.to_markdown(), source_line=line, anchor_global_y=screen_y)
 
     def eventFilter(self, watched, event):
+        if (watched is self.reading_view.browser.viewport() and self._reading_view_enabled
+                and event.type() == QEvent.MouseButtonDblClick and event.button() == Qt.LeftButton):
+            self.set_reading_view(False)
+            return True
         if self.isVisible() and event.type() == QEvent.MouseButtonPress and isinstance(watched, QWidget):
             if watched is not self and not self.isAncestorOf(watched):
                 self.reject()
@@ -571,7 +728,15 @@ class _MapBodyEditDialog(QDialog):
         if self.isVisible() and event.type() == QEvent.ApplicationDeactivate:
             self.reject()
             return False
-        if watched is self.editor and event.type() in (QEvent.ShortcutOverride, QEvent.KeyPress):
+        if watched in (self.editor, self.reading_view.browser) and event.type() in (QEvent.ShortcutOverride, QEvent.KeyPress):
+            mods = event.modifiers() & ~Qt.KeypadModifier
+            toggle = event.key() == Qt.Key_Space and mods in (Qt.ControlModifier, Qt.MetaModifier)
+            edit = self._reading_view_enabled and event.key() in (Qt.Key_Return, Qt.Key_Enter) and not mods
+            if toggle or edit:
+                event.accept()
+                if event.type() == QEvent.KeyPress:
+                    self.set_reading_view(not self._reading_view_enabled if toggle else False)
+                return True
             save = event.key() in (Qt.Key_Return, Qt.Key_Enter) and event.modifiers() == Qt.ControlModifier
             cancel = event.key() == Qt.Key_Escape and not event.modifiers()
             if save or cancel:
@@ -579,7 +744,7 @@ class _MapBodyEditDialog(QDialog):
                 if event.type() == QEvent.KeyPress:
                     if save:
                         self.saveRequested.emit()
-                    elif self.editor._vi_feature_enabled and self.editor._vi_insert_mode:
+                    elif not self._reading_view_enabled and self.editor._vi_feature_enabled and self.editor._vi_insert_mode:
                         self.editor._enter_vi_navigation_mode()
                     else:
                         self.reject()
@@ -686,7 +851,8 @@ class MapPanel(QWidget):
         self._tooltip_pinned: bool = False
         self._tooltip_hovered: bool = False
         self._selected_note_popup_active: bool = False
-        self._note_font_size_offset: int = 0
+        self._read_font_size = max(8, QApplication.font().pointSize())
+        self._edit_font_size = self._read_font_size
         self._theme_colors = self._map_theme_colors()
         self._scroll_animations: list[QPropertyAnimation] = []
         self._undo_stack: list[tuple[str, int]] = []
@@ -885,6 +1051,7 @@ class MapPanel(QWidget):
         self._tooltip_hide_timer.timeout.connect(self._hide_hover_tooltip_if_idle)
         self._content_tooltip = _MapContentTooltip(self)
         self._content_tooltip.pinRequested.connect(self._pin_hover_tooltip)
+        self._content_tooltip.fontZoomRequested.connect(lambda delta: self._change_map_font_size(delta, reading=True))
         self._content_tooltip.dismissed.connect(self._on_tooltip_dismissed)
         self._content_tooltip.hoverChanged.connect(self._on_tooltip_hover_changed)
         self._inline_rename_edit = _InlineNodeRenameEdit(self.preview_label)
@@ -903,8 +1070,11 @@ class MapPanel(QWidget):
 
         self._apply_palette_styles()
         self._update_level_controls()
-        self._note_font_size_offset = config.load_map_note_font_size_offset()
+        legacy_size = max(8, int(QApplication.font().pointSize() * (1 + config.load_map_note_font_size_offset() * 0.1)))
+        self._read_font_size = config.load_map_content_font_size("read", legacy_size)
+        self._edit_font_size = config.load_map_content_font_size("edit", legacy_size)
         self._toggle_content_previews(config.load_map_note_panel_visible())
+        self.set_window_mode_control(visible=self._detached_window)
 
     def changeEvent(self, event) -> None:  # type: ignore[override]
         super().changeEvent(event)
@@ -1027,6 +1197,12 @@ class MapPanel(QWidget):
     def set_window_mode_control(self, *, visible: bool, windowed: bool = False) -> None:
         """Show and update the detached mind-map window mode control."""
         self._detached_window = visible
+        for control in (self.note_toggle_btn, self.note_font_smaller_btn, self.note_font_larger_btn):
+            control.setVisible(visible)
+        if not visible:
+            self._cancel_hover_tooltip()
+            if self._body_editor is not None:
+                self._body_editor.reject()
         self.window_mode_btn.setVisible(visible)
         self.close_window_btn.setVisible(visible)
         self.window_mode_btn.setProperty("windowed", windowed)
@@ -1098,7 +1274,7 @@ class MapPanel(QWidget):
         # Editor refreshes contain display markers for headings, links, and
         # tasks. Store source Markdown consistently so a display round trip
         # does not look like an external edit and erase map undo history.
-        incoming_text = self._content_tooltip._editor._from_display(markdown_text or "")
+        incoming_text = self._content_tooltip._source_editor._from_display(markdown_text or "")
         if is_new_page or incoming_text.rstrip("\n") != self._current_markdown.rstrip("\n"):
             self._clear_delete_feedback()
             self._vi_delete_pending = None
@@ -2107,13 +2283,15 @@ class MapPanel(QWidget):
 
     def _activate_selected_node(self, *, keep_focus: bool) -> bool:
         node = self._selected_node()
-        if not node or not self._current_page_path or node.line_number <= 0:
+        if not node or not self._current_page_path or (node.line_number <= 0 and node.depth != 0):
             return False
         self._mark_activation_source("keyboard_keep_panel" if keep_focus else "keyboard")
-        self.headingActivated.emit(self._current_page_path, node.line_number)
+        self.headingActivated.emit(self._current_page_path, max(1, node.line_number))
         return True
 
-    def _edit_selected_body(self) -> bool:
+    def _edit_selected_body(self, *, start_insert=False) -> bool:
+        if not self._detached_window:
+            return False
         node = self._selected_node()
         if node is None or not self._current_page_path:
             return False
@@ -2121,6 +2299,7 @@ class MapPanel(QWidget):
             self._body_editor.raise_()
             self._body_editor.editor.setFocus()
             return True
+        reading_geometry = self._content_tooltip.geometry() if self._content_tooltip.isVisible() else None
         self._content_tooltip.hide()
         self._on_tooltip_dismissed()
         path, original = self._current_page_path, self._current_markdown
@@ -2170,20 +2349,20 @@ class MapPanel(QWidget):
         popup.saveRequested.connect(save)
         anchor = self._selected_node_popup_anchor()
         avail = popup_available_geometry(anchor=anchor, parent=self)
-        height = min(320, max(200, 90 + popup.editor.fontMetrics().lineSpacing() * min(10, len(initial_body.splitlines()) + 1)))
-        size = QSize(min(560, max(1, avail.width() - 24)), min(height, max(1, avail.height() - 64)))
+        size = _map_note_popup_size(avail)
         popup.resize(size)
         popup.show()
-        # Native title bars are outside QWidget.size(). Fit the complete frame
-        # after it exists so the bottom buttons stay inside the work area.
-        frame = popup.frameGeometry().size()
-        extra = frame - popup.size()
-        popup.setMaximumSize(max(1, avail.width() - 16 - extra.width()), max(1, avail.height() - 16 - extra.height()))
+        popup.setMaximumSize(size)
+        if reading_geometry is not None:
+            size = reading_geometry.size().boundedTo(size)
+            anchor = reading_geometry.topLeft()
         popup.resize(size.boundedTo(popup.maximumSize()))
         popup.move(clamp_popup_top_left(anchor, popup.frameGeometry().size(), avail, margin=8))
         popup.raise_()
         popup.activateWindow()
         popup.editor.setFocus(Qt.OtherFocusReason)
+        if start_insert and popup.editor._vi_feature_enabled:
+            popup.editor._enter_vi_insert_mode()
         return True
 
     def _build_map_svg(self, root: _MindNode, *, reset_canvas: bool) -> str:
@@ -2683,25 +2862,25 @@ class MapPanel(QWidget):
 
     def _increase_note_font_size(self) -> None:
         """Increase the note preview font size offset."""
-        self._note_font_size_offset = min(10, self._note_font_size_offset + 1)
-        config.save_map_note_font_size_offset(self._note_font_size_offset)
-        if self._content_tooltip.isVisible() or self._body_editor is not None:
-            self._update_tooltip_font_size()
+        self._change_map_font_size(1, reading=True)
 
     def _decrease_note_font_size(self) -> None:
         """Decrease the note preview font size offset."""
-        self._note_font_size_offset = max(-5, self._note_font_size_offset - 1)
-        config.save_map_note_font_size_offset(self._note_font_size_offset)
-        if self._content_tooltip.isVisible() or self._body_editor is not None:
-            self._update_tooltip_font_size()
+        self._change_map_font_size(-1, reading=True)
+
+    def _change_map_font_size(self, delta: int, *, reading: bool) -> None:
+        view = "read" if reading else "edit"
+        attribute = "_read_font_size" if reading else "_edit_font_size"
+        size = max(8, min(36, getattr(self, attribute) + delta))
+        setattr(self, attribute, size)
+        config.save_map_content_font_size(view, size)
+        self._update_tooltip_font_size()
 
     def _update_tooltip_font_size(self) -> None:
-        """Keep note preview and body editing text at the same size."""
-        # Keep note text size independent from map canvas zoom.
-        zoom = 1.0 + (self._note_font_size_offset * 0.1)
-        self._content_tooltip.set_font_zoom(zoom)
+        """Apply separate saved reading/editing sizes, independent of map zoom."""
+        self._content_tooltip.set_font_point_size(self._read_font_size)
         if self._body_editor is not None:
-            self._body_editor.editor.set_font_point_size(self._content_tooltip._editor.font().pointSize())
+            self._body_editor.apply_font_sizes(self._read_font_size, self._edit_font_size)
 
     def _tooltip_debug_log(self, event: str, **fields) -> None:
         if not log_enabled("ui_state"):
@@ -2767,6 +2946,9 @@ class MapPanel(QWidget):
         self._tooltip_debug_log("cancel_hover_tooltip:end")
 
     def _schedule_hover_tooltip(self, node: Optional[_MindNode], global_pos: QPoint) -> None:
+        if not self._detached_window:
+            self._cancel_hover_tooltip()
+            return
         self._tooltip_debug_log(
             "schedule_hover_tooltip",
             node_id=(node.node_id if node is not None else None),
@@ -2820,13 +3002,20 @@ class MapPanel(QWidget):
         self._tooltip_debug_log("tooltip_dismissed:end")
 
     def _pin_hover_tooltip(self) -> None:
+        if not self._detached_window:
+            self._cancel_hover_tooltip()
+            return
         if not self._content_tooltip.isVisible():
             return
+        if self._hovered_node_id:
+            node = self._node_by_id(self._hovered_node_id)
+            if node is not None:
+                self._set_selected_node(node)
         self._tooltip_debug_log("pin_hover_tooltip:start")
         self._tooltip_timer.stop()
         self._tooltip_hide_timer.stop()
         self._tooltip_pinned = True
-        self._selected_note_popup_active = False
+        self._selected_note_popup_active = True
         self._content_tooltip.set_pinned(True)
         try:
             self._content_tooltip.show()
@@ -2838,6 +3027,9 @@ class MapPanel(QWidget):
         self._tooltip_debug_log("pin_hover_tooltip:end")
 
     def _show_hover_tooltip(self) -> None:
+        if not self._detached_window:
+            self._cancel_hover_tooltip()
+            return
         self._tooltip_debug_log("show_hover_tooltip:start", hovered_node=self._hovered_node_id)
         if not self._content_preview_enabled or self._hovered_node_id is None:
             return
@@ -2851,7 +3043,8 @@ class MapPanel(QWidget):
         self._selected_note_popup_active = False
         self._content_tooltip.set_pinned(False)
         self._update_tooltip_font_size()
-        self._content_tooltip.show_markdown(text, self._current_page_path, pos)
+        self._content_tooltip.show_markdown(text, self._current_page_path, pos,
+                                          heading=node.heading_text or node.label, node_id=node.node_id)
         self._tooltip_debug_log("show_hover_tooltip:end", text_len=len(text))
 
     def _selected_node_popup_anchor(self) -> QPoint:
@@ -2869,7 +3062,17 @@ class MapPanel(QWidget):
         )
         return self.preview_label.mapToGlobal(local_point)
 
+    def _preview_matches_mouse(self, event) -> bool:
+        if not self._content_tooltip.isVisible():
+            return False
+        position = self._event_svg_position(event)
+        node = self._node_at_position(*position) if position else None
+        return node is not None and node.node_id == self._content_tooltip.node_id
+
     def _show_selected_node_note_popup(self) -> bool:
+        if not self._detached_window:
+            self._cancel_hover_tooltip()
+            return self._activate_selected_node(keep_focus=True)
         self._tooltip_debug_log("show_selected_popup:start")
         node = self._selected_node()
         if node is None:
@@ -2877,6 +3080,8 @@ class MapPanel(QWidget):
         text = self._node_tooltip_markdown(node)
         if not text.strip():
             return False
+        reuse_preview = (self._content_tooltip.isVisible() and self._content_tooltip.node_id == node.node_id
+                         and self._content_tooltip.reading_view.last_markdown == text)
         self._tooltip_timer.stop()
         self._tooltip_hide_timer.stop()
         self._tooltip_pinned = True
@@ -2884,7 +3089,9 @@ class MapPanel(QWidget):
         self._selected_note_popup_active = True
         self._content_tooltip.set_pinned(True)
         self._update_tooltip_font_size()
-        self._content_tooltip.show_markdown(text, self._current_page_path, self._selected_node_popup_anchor())
+        if not reuse_preview:
+            self._content_tooltip.show_markdown(text, self._current_page_path, self._selected_node_popup_anchor(),
+                                              heading=node.heading_text or node.label, node_id=node.node_id)
         try:
             self._content_tooltip.raise_()
             self._content_tooltip.activateWindow()
@@ -2913,6 +3120,9 @@ class MapPanel(QWidget):
         if not (self._selected_note_popup_active and self._content_tooltip.isVisible()):
             return False
         self._tooltip_debug_log("selected_popup_keypress", key=int(key), mods=getattr(mods, "value", 0))
+        if (key in (Qt.Key_Return, Qt.Key_Enter) and mods == Qt.NoModifier) or (
+                key == Qt.Key_Space and mods in (Qt.ControlModifier, Qt.MetaModifier)):
+            return self._edit_selected_body(start_insert=True)
         if key in (Qt.Key_Return, Qt.Key_Enter) and mods == Qt.ControlModifier:
             self._content_tooltip.hide()
             self._on_tooltip_dismissed()
@@ -2922,11 +3132,6 @@ class MapPanel(QWidget):
             self._on_tooltip_dismissed()
             return True
         if key in (Qt.Key_Return, Qt.Key_Enter) and mods == Qt.AltModifier:
-            self._content_tooltip.hide()
-            self._on_tooltip_dismissed()
-            return True
-        if key == Qt.Key_Space and mods == Qt.ControlModifier:
-            self._tooltip_debug_log("selected_popup_keypress:ctrl_space")
             self._content_tooltip.hide()
             self._on_tooltip_dismissed()
             return True
@@ -3468,7 +3673,10 @@ class MapPanel(QWidget):
         vi = config.load_vi_mode_enabled()
         rows = [
             ("Navigate", "Arrow keys", "H / J / K / L"),
-            ("Review content", "Enter", "Enter"),
+            ("Review content" if self._detached_window else "Scroll editor to section", "Enter / click", "Enter / click"),
+            *([("Edit reviewed content", "Enter / double-click", "Enter / double-click"),
+               ("Toggle reading / editing in body popup", "Ctrl/Cmd+Space", "Ctrl/Cmd+Space")]
+              if self._detached_window else []),
             ("Expand / collapse branch", "Space", "Space"),
             ("Edit body (map window)" if self._detached_window else "Reveal heading in editor; keep map focus", "Ctrl+Enter", "Ctrl+Enter"),
             ("Rename heading", "F2", "i"),
@@ -3488,13 +3696,20 @@ class MapPanel(QWidget):
             ("Page through review", "PageUp / PageDown", "Ctrl+U / Ctrl+D"),
             ("Keyboard help", "?", "?"),
         ]
+        if not self._detached_window:
+            rows = [row for row in rows if row[0] not in {"Scroll review", "Page through review"}]
         header = "<th>Action</th><th>Standard keys</th>" + ("<th>Vi keys</th>" if vi else "")
         body = "".join("<tr>" + "".join(f"<td>{html.escape(cell)}</td>" for cell in row[:3 if vi else 2]) + "</tr>" for row in rows if vi or row[1] != "—")
+        review_help = (
+            "<p>In the body editor: Ctrl+Enter saves; Esc or clicking outside cancels. In vi insert mode, Esc returns to navigation first. Child headings stay separate.</p>"
+            if self._detached_window else
+            "<p>Click a node or press Enter to scroll the main editor to that section. Node previews and body editing are available in the full-screen map.</p>"
+        )
         return (
             "<style>th, td { padding: 5px 12px; text-align: left; } th { font-weight: bold; }</style>"
             f"<h2>Map keyboard help</h2><table cellspacing='0'><tr>{header}</tr>{body}</table>"
             "<p>While adding or renaming: type normally, Enter saves, Esc cancels.</p>"
-            "<p>In the body editor: Ctrl+Enter saves; Esc or clicking outside cancels. In vi insert mode, Esc returns to navigation first. Child headings stay separate.</p>"
+            f"{review_help}"
             "<p>Moves carry the heading, its content, and all descendants. Map undo covers heading and structure changes. Saving body content starts a fresh map undo history.</p>"
         )
 
@@ -3737,9 +3952,8 @@ class MapPanel(QWidget):
                 node = self._node_at_position(*svg_pos) if svg_pos else None
                 self._schedule_hover_tooltip(node, event.globalPos())
             if event.type() == event.Type.MouseButtonPress and self._content_tooltip.isVisible() and not self._tooltip_pinned:
-                # A click in the popup itself pins it; a click back on the map
-                # dismisses the sticky hover preview and performs that map action.
-                self._cancel_hover_tooltip()
+                if not self._preview_matches_mouse(event):
+                    self._cancel_hover_tooltip()
             if event.type() == event.Type.MouseButtonDblClick and event.button() == Qt.LeftButton:
                 self._cancel_hover_tooltip()
                 self.preview_label.setFocus(Qt.MouseFocusReason)
@@ -3747,7 +3961,8 @@ class MapPanel(QWidget):
                     event.accept()
                     return True
             if event.type() == event.Type.MouseButtonPress and event.button() == Qt.LeftButton:
-                self._cancel_hover_tooltip()
+                if not self._preview_matches_mouse(event):
+                    self._cancel_hover_tooltip()
                 self.preview_label.setFocus(Qt.MouseFocusReason)
                 if self._toggle_node_at(event):
                     event.accept()
@@ -3762,7 +3977,6 @@ class MapPanel(QWidget):
                     event.accept()
                     return True
             if event.type() == event.Type.MouseMove and self._drag_press_node_id is not None:
-                self._cancel_hover_tooltip()
                 if self._drag_start_pos is None:
                     return True
                 if not self._drag_active:
@@ -3774,6 +3988,7 @@ class MapPanel(QWidget):
                         self._clear_drag_state()
                         return True
                     self._drag_active = True
+                self._cancel_hover_tooltip()
                 svg_pos = self._event_svg_position(event)
                 node = self._node_at_position(*svg_pos) if svg_pos else None
                 target, valid = self._drop_target_for_node(node)
@@ -3787,7 +4002,8 @@ class MapPanel(QWidget):
                 event.accept()
                 return True
             if event.type() == event.Type.MouseButtonRelease and event.button() == Qt.LeftButton and self._drag_press_node_id is not None:
-                self._cancel_hover_tooltip()
+                if self._drag_active or not self._preview_matches_mouse(event):
+                    self._cancel_hover_tooltip()
                 if self._drag_active:
                     target = self._node_by_id(self._drop_target_node_id) if self._drop_target_node_id else None
                     if target is not None and self._drop_target_valid:
@@ -3804,12 +4020,18 @@ class MapPanel(QWidget):
                 self._clear_drag_state()
                 if released is not None and pressed is not None and released.node_id == pressed.node_id:
                     if released.line_number > 0 and self._current_page_path:
-                        self._mark_activation_source("mouse")
-                        self.headingActivated.emit(self._current_page_path, released.line_number)
+                        if (event.modifiers() & ~Qt.KeypadModifier) in (Qt.ControlModifier, Qt.MetaModifier):
+                            self._mark_activation_source("mouse")
+                            self.headingActivated.emit(self._current_page_path, released.line_number)
+                        else:
+                            self._show_selected_node_note_popup()
                     event.accept()
                     return True
         if watched is self.preview_label and isinstance(event, QKeyEvent) and event.type() == QEvent.KeyPress:
-            self._cancel_hover_tooltip()
+            opens_preview = (event.key() in (Qt.Key_Return, Qt.Key_Enter)
+                             or (event.key() == Qt.Key_Space and event.modifiers() in (Qt.ControlModifier, Qt.MetaModifier)))
+            if not opens_preview:
+                self._cancel_hover_tooltip()
             self.keyPressEvent(event)
             if event.isAccepted():
                 return True

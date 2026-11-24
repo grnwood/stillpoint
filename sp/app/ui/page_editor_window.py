@@ -35,11 +35,13 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
     QWidget,
+    QStackedWidget,
 )
 from PySide6.QtCore import QSize
 
 from .find_replace_bar import FindReplaceBar
 from .markdown_editor import MarkdownEditor, MARKDOWN_IMAGE_WIDTH_OPTIONS
+from .markdown_preview import MarkdownReadingView
 from .keyboard_shortcuts import is_vi_navigation_chord, primary_modifier_label
 from .canvas_navigation import install_primary_wheel_zoom
 from .insert_link_dialog import InsertLinkDialog
@@ -131,6 +133,7 @@ class PageEditorWindow(QMainWindow):
             "padding: 2px 6px; border-radius: 3px;"
         )
         self._font_size = config.load_popup_font_size(14)
+        self._reading_view_enabled = False
 
         self.editor = MarkdownEditor()
         self.editor.set_page_navigation_enabled(False)
@@ -146,6 +149,14 @@ class PageEditorWindow(QMainWindow):
         self.editor.set_task_hover_edit_enabled(True)
         self.editor.set_read_only_mode(self._read_only)
         self.editor.set_ai_shortcuts_enabled(False)
+        self.reading_view = MarkdownReadingView(preference_scope="page_editor")
+        self.reading_view.set_header_visible(False)
+        self.reading_view.editRequested.connect(lambda: self._set_reading_view(False))
+        self.reading_view.linkActivated.connect(self._open_in_main)
+        self.reading_view.toc_widget.set_base_path(ensure_root_colon_link(path_to_colon(self._source_path)))
+        self.reading_view.browser.headingPickerRequested.connect(self._request_heading_picker_popup)
+        self.reading_view.browser.installEventFilter(self)
+        install_primary_wheel_zoom(self.reading_view.browser, self._adjust_font_size)
         self.editor.linkCopied.connect(
             lambda link: self.statusBar().showMessage(f"Copied link: {link}", 3000)
         )
@@ -168,7 +179,10 @@ class PageEditorWindow(QMainWindow):
         editor_layout = QVBoxLayout(editor_host)
         editor_layout.setContentsMargins(0, 0, 0, 0)
         editor_layout.setSpacing(0)
-        editor_layout.addWidget(self.editor, 1)
+        self._editor_stack = QStackedWidget(editor_host)
+        self._editor_stack.addWidget(self.editor)
+        self._editor_stack.addWidget(self.reading_view)
+        editor_layout.addWidget(self._editor_stack, 1)
         editor_layout.addWidget(self._find_bar)
         self.setCentralWidget(editor_host)
         self._apply_theme_palette()
@@ -224,6 +238,7 @@ class PageEditorWindow(QMainWindow):
         self._build_toolbar()
         self._install_close_window_action()
         self._load_content()
+        self._set_reading_view(config.load_page_editor_reading_view(), persist=False)
         self._update_title()
         self._size_and_center(parent)
         self._restore_geometry()
@@ -672,6 +687,11 @@ class PageEditorWindow(QMainWindow):
         return cleaned.strip()
 
     def _show_find_bar(self, *, replace: bool, backwards: bool = False, seed: Optional[str] = None) -> None:
+        if self._reading_view_enabled:
+            if not replace:
+                self.reading_view.show_find()
+                return
+            self._set_reading_view(False)
         query = seed if seed is not None else self._selected_text_for_search()
         query = self._sanitize_find_query(query)
         if not query:
@@ -705,6 +725,8 @@ class PageEditorWindow(QMainWindow):
 
     def _insert_date(self) -> None:
         """Show calendar/date dialog and insert selected date."""
+        if self._reading_view_enabled:
+            self._set_reading_view(False)
         cursor = self.editor.textCursor()
         saved_cursor_pos = cursor.position()
         saved_anchor_pos = cursor.anchor()
@@ -818,6 +840,24 @@ class PageEditorWindow(QMainWindow):
         toolbar.addAction(reload_action)
         self.addAction(reload_action)
 
+        toolbar.addSeparator()
+        self._reading_action = QAction("Reading View", self)
+        self._reading_action.setCheckable(True)
+        self._reading_action.setIcon(self._load_tinted_icon(assets_root / "read-mode.svg", size=16) or QIcon())
+        self._reading_action.setShortcuts([QKeySequence("Ctrl+Space"), QKeySequence("Meta+Space")])
+        self._reading_action.setShortcutContext(Qt.WindowShortcut)
+        self._reading_action.toggled.connect(self._set_reading_view)
+        toolbar.addAction(self._reading_action)
+        self.addAction(self._reading_action)
+        self._reading_theme_action = toolbar.addWidget(self.reading_view.theme_toggle)
+        self._reading_options_action = toolbar.addWidget(self.reading_view.options_button)
+        self.reading_view.options_button.setIcon(
+            self._load_tinted_icon(assets_root / "reading-options.svg", size=16) or QIcon()
+        )
+        self._reading_theme_action.setVisible(False)
+        self._reading_options_action.setVisible(False)
+        toolbar.addSeparator()
+
         insert_link_action = QAction("Insert Link…", self)
         insert_link_action.setShortcut(QKeySequence("Ctrl+L"))
         insert_link_action.setShortcutContext(Qt.WindowShortcut)
@@ -852,8 +892,49 @@ class PageEditorWindow(QMainWindow):
 
         self.addToolBar(Qt.TopToolBarArea, toolbar)
 
+    def _set_reading_view(self, enabled: bool, *, persist: bool = True) -> None:
+        enabled = bool(enabled)
+        if enabled:
+            self._find_bar.hide()
+            self.reading_view.set_vi_enabled(self._vi_enabled)
+            self.reading_view.set_vi_cursor_style(config.load_vi_cursor_style())
+            self._render_reading_view()
+        elif self._reading_view_enabled:
+            line, _ = self.reading_view.reading_view_position()
+            block = self.editor.document().findBlockByNumber(max(0, line - 1))
+            if block.isValid():
+                self.editor.setTextCursor(QTextCursor(block))
+                self.editor.ensureCursorVisible()
+            self.reading_view.hide_find()
+            self.reading_view.options_popup.hide()
+        self._reading_view_enabled = enabled
+        self._editor_stack.setCurrentWidget(self.reading_view if enabled else self.editor)
+        self._reading_action.blockSignals(True)
+        self._reading_action.setChecked(enabled)
+        self._reading_action.blockSignals(False)
+        self._reading_action.setToolTip("Switch to editing" if enabled else "Switch to Reading View (Ctrl+Space)")
+        self._reading_theme_action.setVisible(enabled)
+        self._reading_options_action.setVisible(enabled)
+        if persist:
+            config.save_page_editor_reading_view(enabled)
+        self._position_toc_widget()
+        surface = self.reading_view.browser if enabled else self.editor
+        surface.setFocus(Qt.ShortcutFocusReason)
+
+    def _render_reading_view(self) -> None:
+        if self._reading_view_enabled and self.reading_view.last_markdown:
+            line, screen_y = self.reading_view.reading_view_position()
+        else:
+            line, screen_y = self.reading_view.editor_view_position(self.editor)
+        self.reading_view.match_editor_layout(self.editor)
+        self.reading_view.set_markdown(
+            self.editor.to_markdown(),
+            base_directory=(Path(self.vault_root) / self._source_path.lstrip("/")).parent if self.vault_root else None,
+            source_line=line, anchor_global_y=screen_y,
+        )
+
     def _icon_tint_color(self) -> QColor:
-        pal = QApplication.palette()
+        pal = self.palette()
         bg = pal.color(QPalette.Window)
         if bg.lightness() > 128:
             return QColor(0, 0, 0)
@@ -933,6 +1014,8 @@ class PageEditorWindow(QMainWindow):
         self.editor.document().setModified(False)
         self._autosave_timer.stop()
         self._update_dirty_indicator()
+        if self._reading_view_enabled:
+            self._render_reading_view()
 
     def _refresh_saved_state(self) -> None:
         """Refresh a clean buffer on activation; preserve unsaved local edits."""
@@ -1082,6 +1165,8 @@ class PageEditorWindow(QMainWindow):
         self.statusBar().showMessage("Reloaded current page", 2000)
 
     def _insert_link(self) -> None:
+        if self._reading_view_enabled:
+            self._set_reading_view(False)
         if not self.vault_root:
             QMessageBox.information(self, "StillPoint", "Select a vault before inserting links.")
             return
@@ -1205,6 +1290,11 @@ class PageEditorWindow(QMainWindow):
             self._dirty_status_label.setToolTip("All changes saved")
 
     def _adjust_font_size(self, delta: int) -> None:
+        if self._reading_view_enabled:
+            options = dict(self.reading_view.reading_options)
+            options["size"] = max(60, min(200, options["size"] + delta * 10))
+            self.reading_view.set_reading_options(options)
+            return
         new_size = max(6, min(24, self._font_size + delta))
         if new_size == self._font_size:
             return
@@ -1216,6 +1306,8 @@ class PageEditorWindow(QMainWindow):
             pass
 
     def _open_ai_assist(self) -> None:
+        if self._reading_view_enabled:
+            self._set_reading_view(False)
         if not config.load_enable_ai_chats():
             self.statusBar().showMessage("Enable AI Chats in Preferences to use AI assist.", 4000)
             return
@@ -1445,7 +1537,7 @@ class PageEditorWindow(QMainWindow):
             return
         enabled = config.load_toc_widget_enabled() and config.load_page_editor_toc_widget_enabled()
         scrollable = self.editor.verticalScrollBar().maximum() > 0
-        if not enabled or not scrollable or len(self._toc_headings) <= 1:
+        if self._reading_view_enabled or not enabled or not scrollable or len(self._toc_headings) <= 1:
             widget.hide()
             return
         if force or not widget.isVisible():
@@ -1518,8 +1610,9 @@ class PageEditorWindow(QMainWindow):
 
     def _request_heading_picker_popup(self) -> None:
         _page_editor_log("[PageEditor] Explicit heading picker shortcut triggered")
-        cursor_rect = self.editor.cursorRect()
-        viewport = self.editor.viewport()
+        surface = self.reading_view.browser if self._reading_view_enabled else self.editor
+        cursor_rect = surface.cursorRect()
+        viewport = surface.viewport()
         prefer_above = False
         try:
             prefer_above = cursor_rect.center().y() > (viewport.height() // 2)
@@ -1665,13 +1758,21 @@ class PageEditorWindow(QMainWindow):
             self.editor.setTextCursor(cursor)
             self.editor.ensureCursorVisible()
             popup.close()
-            QTimer.singleShot(0, lambda: self.editor.setFocus(Qt.OtherFocusReason))
+            if self._reading_view_enabled:
+                self.reading_view.scroll_to_source_line(cursor.blockNumber() + 1)
+                QTimer.singleShot(0, self.reading_view.focus_reader)
+            else:
+                QTimer.singleShot(0, lambda: self.editor.setFocus(Qt.OtherFocusReason))
 
         filter_edit.textChanged.connect(populate)
         list_widget.itemDoubleClicked.connect(lambda *_: activate_current())
         list_widget.itemActivated.connect(lambda *_: activate_current())
 
-        editor_ref = self.editor
+        editor_ref = self.reading_view.browser if self._reading_view_enabled else self.editor
+
+        def restore_picker_focus():
+            editor_ref.window().activateWindow()
+            editor_ref.setFocus(Qt.OtherFocusReason)
 
         class _PickerFilter(QObject):
             @staticmethod
@@ -1712,7 +1813,7 @@ class PageEditorWindow(QMainWindow):
                     if ev.key() == Qt.Key_Escape:
                         popup.close()
                         if editor_ref:
-                            QTimer.singleShot(0, lambda: editor_ref.setFocus(Qt.OtherFocusReason))
+                            QTimer.singleShot(0, restore_picker_focus)
                         return True
                 return False
 

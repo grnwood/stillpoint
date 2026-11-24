@@ -270,6 +270,29 @@ def test_empty_list_escape_clears_marker_then_becomes_navigation_escape(
     editor.close()
 
 
+@pytest.mark.parametrize("mode", ["off", "navigation", "insert"])
+@pytest.mark.parametrize("line", ["\t", "    ", "\tindented text", "ordinary text"])
+def test_escape_returns_to_column_one_without_changing_text(qtbot, mode, line):
+    editor = MarkdownEditor()
+    qtbot.addWidget(editor)
+    text = "First line\n" + line
+    editor.setPlainText(text)
+    editor.set_vi_mode_enabled(mode != "off")
+    if mode == "insert":
+        editor._enter_vi_insert_mode()
+    cursor = editor.textCursor()
+    cursor.movePosition(QTextCursor.End)
+    editor.setTextCursor(cursor)
+
+    QTest.keyClick(editor, Qt.Key_Escape)
+
+    assert editor.textCursor().blockNumber() == 1
+    assert editor.textCursor().positionInBlock() == 0
+    assert editor.toPlainText() == text
+    if mode == "insert":
+        assert not editor._vi_insert_mode
+
+
 def test_ctrl_alt_r_removes_task_indicators_without_editor_escape(
     qapp: QApplication,
 ) -> None:

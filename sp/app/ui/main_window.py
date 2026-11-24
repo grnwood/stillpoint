@@ -20419,7 +20419,7 @@ class MainWindow(QMainWindow):
                 initial_vsplit=config.load_puml_vsplit_state(),
             )
             app = QApplication.instance()
-            if app is not None:
+            if app is not None and process is not None:
                 app.aboutToQuit.connect(
                     lambda p=process: p.terminate() if p.poll() is None else None
                 )
@@ -20447,9 +20447,27 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._alert(f"Failed to open PlantUML editor: {exc}")
 
+    def _reserve_remote_diagram_editor(self, editor: str, remote_path: str):
+        from sp.app.diagram_editor_process import DiagramEditorInstance
+
+        cache_root = self._ensure_remote_cache_root()
+        cache_path = (cache_root / "attachments" / remote_path.lstrip("/")).resolve()
+        instance = DiagramEditorInstance(editor, cache_path)
+        try:
+            if instance.claim():
+                return cache_path, instance
+        except RuntimeError as exc:
+            self._alert(f"Failed to open diagram editor: {exc}")
+        instance.close()
+        return None
+
     def _open_remote_plantuml_editor(self, remote_path: str, page_key: Optional[str]) -> None:
         if not remote_path:
             return
+        reservation = self._reserve_remote_diagram_editor("plantuml", remote_path)
+        if reservation is None:
+            return
+        cache_path, instance = reservation
         try:
             resp = self.http.get("/api/file/raw", params={"path": remote_path})
             if resp.status_code == 401 and self._remote_mode:
@@ -20457,19 +20475,20 @@ class MainWindow(QMainWindow):
                     resp = self.http.get("/api/file/raw", params={"path": remote_path})
             resp.raise_for_status()
         except httpx.HTTPError as exc:
+            instance.close()
             self._alert_api_error(exc, f"Failed to load {remote_path}")
             return
         try:
             content = resp.content.decode("utf-8")
         except Exception as exc:
+            instance.close()
             self._alert(f"Failed to decode {remote_path}: {exc}")
             return
-        cache_root = self._ensure_remote_cache_root()
-        cache_path = (cache_root / "attachments" / remote_path.lstrip("/")).resolve()
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             cache_path.write_text(content, encoding="utf-8")
         except OSError as exc:
+            instance.close()
             self._alert(f"Failed to cache remote file: {exc}")
             return
 
@@ -20503,6 +20522,8 @@ class MainWindow(QMainWindow):
         try:
             from .plantuml_editor_window import PlantUMLEditorWindow
             window = PlantUMLEditorWindow(str(cache_path), parent=None, on_save=_save_remote)
+            window.setAttribute(Qt.WA_DeleteOnClose, True)
+            instance.bind(window)
             try:
                 window.setWindowFlag(Qt.Window, True)
                 window.setWindowFlag(Qt.Tool, False)
@@ -20519,6 +20540,7 @@ class MainWindow(QMainWindow):
                 pass
             window.show()
         except Exception as exc:
+            instance.close()
             self._alert(f"Failed to open PlantUML editor: {exc}")
 
     def _open_mermaid_editor(self, file_path) -> None:
@@ -20540,7 +20562,7 @@ class MainWindow(QMainWindow):
                 initial_vsplit=config.load_mermaid_vsplit_state(),
             )
             app = QApplication.instance()
-            if app is not None:
+            if app is not None and process is not None:
                 app.aboutToQuit.connect(
                     lambda p=process: p.terminate() if p.poll() is None else None
                 )
@@ -20721,6 +20743,10 @@ class MainWindow(QMainWindow):
     def _open_remote_mermaid_editor(self, remote_path: str, page_key: Optional[str]) -> None:
         if not remote_path:
             return
+        reservation = self._reserve_remote_diagram_editor("mermaid", remote_path)
+        if reservation is None:
+            return
+        cache_path, instance = reservation
         try:
             resp = self.http.get("/api/file/raw", params={"path": remote_path})
             if resp.status_code == 401 and self._remote_mode:
@@ -20728,19 +20754,20 @@ class MainWindow(QMainWindow):
                     resp = self.http.get("/api/file/raw", params={"path": remote_path})
             resp.raise_for_status()
         except httpx.HTTPError as exc:
+            instance.close()
             self._alert_api_error(exc, f"Failed to load {remote_path}")
             return
         try:
             content = resp.content.decode("utf-8")
         except Exception as exc:
+            instance.close()
             self._alert(f"Failed to decode {remote_path}: {exc}")
             return
-        cache_root = self._ensure_remote_cache_root()
-        cache_path = (cache_root / "attachments" / remote_path.lstrip("/")).resolve()
         try:
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             cache_path.write_text(content, encoding="utf-8")
         except OSError as exc:
+            instance.close()
             self._alert(f"Failed to cache remote file: {exc}")
             return
 
@@ -20774,6 +20801,8 @@ class MainWindow(QMainWindow):
         try:
             from .mermaid_editor_window import MermaidEditorWindow
             window = MermaidEditorWindow(str(cache_path), parent=None, on_save=_save_remote)
+            window.setAttribute(Qt.WA_DeleteOnClose, True)
+            instance.bind(window)
             try:
                 window.setWindowFlag(Qt.Window, True)
                 window.setWindowFlag(Qt.Tool, False)
@@ -20790,6 +20819,7 @@ class MainWindow(QMainWindow):
                 pass
             window.show()
         except Exception as exc:
+            instance.close()
             self._alert(f"Failed to open Mermaid editor: {exc}")
 
     def _toggle_mode_overlay(self, mode: str) -> None:

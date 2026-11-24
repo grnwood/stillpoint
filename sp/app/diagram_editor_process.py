@@ -8,11 +8,111 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
+import time
 
-from PySide6.QtCore import QByteArray, QEvent, QObject, QSettings, QTimer
+from PySide6.QtCore import QByteArray, QEvent, QLockFile, QObject, QSettings, QTimer, Qt
+from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 
 EDITORS = ("plantuml", "mermaid")
+
+
+def _diagram_endpoint(editor: str, file_path: str | Path) -> str:
+    if editor not in EDITORS:
+        raise ValueError(f"Unsupported standalone diagram editor: {editor}")
+    path = os.path.normcase(str(Path(file_path).expanduser().resolve()))
+    key = hashlib.sha256(f"{Path.home()}\0{editor}\0{path}".encode("utf-8")).hexdigest()[:24]
+    return str(Path(tempfile.gettempdir()) / f"sp-diagram-{key}")
+
+
+def activate_existing_diagram(editor: str, file_path: str | Path) -> bool:
+    """Ask the process owning this diagram to show its existing window."""
+    endpoint = _diagram_endpoint(editor, file_path)
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            pid, _, _ = QLockFile(endpoint + ".lock").getLockInfo()
+            if pid > 0:
+                ctypes.windll.user32.AllowSetForegroundWindow(pid)
+        except (AttributeError, OSError, ValueError):
+            pass
+    socket = QLocalSocket()
+    socket.connectToServer(endpoint)
+    if not socket.waitForConnected(150):
+        return False
+    socket.disconnectFromServer()
+    return True
+
+
+class DiagramEditorInstance(QObject):
+    """Reserve one editor per file, including while its window is starting."""
+
+    def __init__(self, editor: str, file_path: str | Path):
+        super().__init__()
+        self.editor = editor
+        self.file_path = file_path
+        self.endpoint = _diagram_endpoint(editor, file_path)
+        self.lock = QLockFile(self.endpoint + ".lock")
+        self.lock.setStaleLockTime(0)
+        self.server = QLocalServer(self)
+        self.server.setSocketOptions(QLocalServer.UserAccessOption)
+        self.server.newConnection.connect(self._activate)
+        self.window = None
+        self._activation_pending = False
+
+    def claim(self) -> bool:
+        if not self.lock.tryLock(0):
+            # Another process may have claimed the file just before opening
+            # its socket. Wait briefly for that startup rather than duplicate it.
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                if activate_existing_diagram(self.editor, self.file_path):
+                    return False
+                time.sleep(0.02)
+            raise RuntimeError("This diagram is already opening or its editor is not responding.")
+        # Only the lock owner may clear a socket left behind by a crashed editor.
+        QLocalServer.removeServer(self.endpoint)
+        if not self.server.listen(self.endpoint):
+            self.lock.unlock()
+            raise RuntimeError(self.server.errorString())
+        return True
+
+    def bind(self, window):
+        self.window = window
+        self.setParent(window)
+        window.destroyed.connect(self.close)
+        if self._activation_pending:
+            self._show_window()
+
+    def _activate(self):
+        while self.server.hasPendingConnections():
+            socket = self.server.nextPendingConnection()
+            if socket is not None:
+                socket.disconnectFromServer()
+                socket.deleteLater()
+            self._activation_pending = True
+        if self.window is not None:
+            self._show_window()
+
+    def _show_window(self):
+        self._activation_pending = False
+        self.window.setWindowState(self.window.windowState() & ~Qt.WindowMinimized)
+        self.window.show()
+        self.window.raise_()
+        self.window.activateWindow()
+        if sys.platform == "win32":
+            try:
+                import ctypes
+
+                ctypes.windll.user32.SetForegroundWindow(int(self.window.winId()))
+            except (AttributeError, OSError, ValueError):
+                pass
+
+    def close(self):
+        self.server.close()
+        self.lock.unlock()
 
 
 def _enable_windows_mermaid_web_preview(env) -> None:
@@ -162,8 +262,10 @@ def launch_diagram_editor_process(
     editor: str,
     file_path: str | Path,
     **geometry_options,
-) -> subprocess.Popen:
+) -> subprocess.Popen | None:
     """Launch a local diagram editor with an independent OS application identity."""
+    if activate_existing_diagram(editor, file_path):
+        return None
     env = os.environ.copy()
     if editor == "mermaid" and sys.platform == "win32":
         # Folder Navigator disables WebEngine in its own process. The Mermaid
@@ -199,6 +301,10 @@ def main(argv: list[str] | None = None) -> int:
 
     configure_diagram_editor_process(args.editor)
     app = QApplication(sys.argv[:1])
+    instance = DiagramEditorInstance(args.editor, args.path)
+    if not instance.claim():
+        return 0
+    app.aboutToQuit.connect(instance.close)
     configure_diagram_editor_application(app, args.editor)
     try:
         from sp.app.ui.theme import apply_qt_palette
@@ -225,6 +331,7 @@ def main(argv: list[str] | None = None) -> int:
         initial_vsplit=args.initial_vsplit,
     )
     geometry_store.restore()
+    instance.bind(window)
     window.setWindowFlag(Qt.Window, True)
     window.setWindowFlag(Qt.Tool, False)
     window.setWindowModality(Qt.NonModal)

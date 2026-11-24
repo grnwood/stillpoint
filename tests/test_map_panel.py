@@ -273,6 +273,7 @@ def test_alt_enter_starts_inline_rename(qapp: QApplication) -> None:
 
 def test_left_key_closes_selected_note_popup(qapp: QApplication) -> None:
     panel = MapPanel()
+    panel.set_window_mode_control(visible=True)
     panel.set_content("/Test.md", "# Root\n\n## One\nbody\n\n### Child\n")
     one = _node_by_label(panel, "One")
     panel._set_selected_node(one)
@@ -290,6 +291,7 @@ def test_left_key_closes_selected_note_popup(qapp: QApplication) -> None:
 def test_vi_l_closes_selected_note_popup(qapp: QApplication, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("sp.app.ui.map_panel.config.load_vi_mode_enabled", lambda: True)
     panel = MapPanel()
+    panel.set_window_mode_control(visible=True)
     panel.set_content("/Test.md", "# Root\n\n## One\nbody\n\n### Child\n")
     one = _node_by_label(panel, "One")
     panel._set_selected_node(one)
@@ -306,6 +308,7 @@ def test_vi_l_closes_selected_note_popup(qapp: QApplication, monkeypatch: pytest
 
 def test_note_popup_escape_closes_selected_note_popup(qapp: QApplication) -> None:
     panel = MapPanel()
+    panel.set_window_mode_control(visible=True)
     panel.set_content("/Test.md", "# Root\n\n## Parent\nintro\n")
     parent = _node_by_label(panel, "Parent")
     panel._set_selected_node(parent)
@@ -321,6 +324,7 @@ def test_note_popup_escape_closes_selected_note_popup(qapp: QApplication) -> Non
 
 def test_down_arrow_scrolls_selected_note_popup(qapp: QApplication) -> None:
     panel = MapPanel()
+    panel.set_window_mode_control(visible=True)
     long_body = "\n".join(f"line {idx}" for idx in range(40))
     panel.set_content("/Test.md", f"# Root\n\n## Parent\n{long_body}\n")
     parent = _node_by_label(panel, "Parent")
@@ -342,6 +346,7 @@ def test_vi_j_scrolls_selected_note_popup_by_line(
 ) -> None:
     monkeypatch.setattr("sp.app.ui.map_panel.config.load_vi_mode_enabled", lambda: True)
     panel = MapPanel()
+    panel.set_window_mode_control(visible=True)
     long_body = "\n".join(f"line {idx}" for idx in range(40))
     panel.set_content("/Test.md", f"# Root\n\n## Parent\n{long_body}\n")
     parent = _node_by_label(panel, "Parent")
@@ -371,6 +376,7 @@ def test_ctrl_shift_j_scrolls_selected_note_popup_by_page_in_vi_mode(
     monkeypatch.setattr("sp.app.ui.keyboard_shortcuts.platform.system", lambda: "Linux")
     monkeypatch.setattr("sp.app.ui.map_panel.config.load_vi_mode_enabled", lambda: True)
     panel = MapPanel()
+    panel.set_window_mode_control(visible=True)
     long_body = "\n".join(f"line {idx}" for idx in range(40))
     panel.set_content("/Test.md", f"# Root\n\n## Parent\n{long_body}\n")
     parent = _node_by_label(panel, "Parent")
@@ -406,6 +412,7 @@ def test_ctrl_enter_reveals_selected_heading_while_keeping_map_focus(qapp: QAppl
 
 def test_ctrl_space_toggles_selected_node_note_popup(qapp: QApplication) -> None:
     panel = MapPanel()
+    panel.set_window_mode_control(visible=True)
     panel.set_content("/Test.md", "# Root\n\n## Parent\nbody\n\n### Child\n")
     parent = _node_by_label(panel, "Parent")
     panel._set_selected_node(parent)
@@ -458,6 +465,7 @@ def test_space_on_root_toggles_h1_visibility(qapp: QApplication) -> None:
 
 def test_note_popup_uses_map_theme_palette(qapp: QApplication) -> None:
     panel = MapPanel()
+    panel.set_window_mode_control(visible=True)
     expected = panel._editor_theme_palette().color(QPalette.Base).name()
 
     assert panel._content_tooltip.palette().color(QPalette.Base).name() == expected
@@ -589,6 +597,7 @@ def test_content_preview_toggle_state_persists(
 
 def test_tooltip_toggle_off_prevents_hover_popup(qapp: QApplication) -> None:
     panel = MapPanel()
+    panel.set_window_mode_control(visible=True)
     panel.set_content("/Test.md", "# Root\n\n## Parent\nintro\n")
     parent = _node_by_label(panel, "Parent")
 
@@ -601,6 +610,7 @@ def test_tooltip_toggle_off_prevents_hover_popup(qapp: QApplication) -> None:
 
 def test_visible_hover_tooltip_can_be_pinned_for_scrolling(qapp: QApplication) -> None:
     panel = MapPanel()
+    panel.set_window_mode_control(visible=True)
     panel.set_content("/Test.md", "# Root\n\n## Parent\nintro\n")
     parent = _node_by_label(panel, "Parent")
 
@@ -619,6 +629,7 @@ def test_visible_hover_tooltip_can_be_pinned_for_scrolling(qapp: QApplication) -
 
 def test_visible_hover_tooltip_remains_after_pointer_leaves_node(qapp: QApplication) -> None:
     panel = MapPanel()
+    panel.set_window_mode_control(visible=True)
     panel.set_content("/Test.md", "# Root\n\n## Parent\nintro\n")
     parent = _node_by_label(panel, "Parent")
 
@@ -638,6 +649,7 @@ def test_existing_hover_tooltip_stays_visible_while_next_node_is_pending(
     qapp: QApplication,
 ) -> None:
     panel = MapPanel()
+    panel.set_window_mode_control(visible=True)
     panel.set_content("/Test.md", "# Root\n\n## First\none\n\n## Second\ntwo\n")
     first = _node_by_label(panel, "First")
     second = _node_by_label(panel, "Second")
@@ -655,6 +667,7 @@ def test_existing_hover_tooltip_stays_visible_while_next_node_is_pending(
 
 def test_transient_tooltip_click_pins_and_close_button_dismisses(qapp: QApplication) -> None:
     panel = MapPanel()
+    panel.set_window_mode_control(visible=True)
     panel.set_content("/Test.md", "# Root\n\n## Parent\nintro\n")
     parent = _node_by_label(panel, "Parent")
 
@@ -719,6 +732,7 @@ def _press(panel, key, mods=Qt.NoModifier, text=""):
 
 def test_enter_reviews_and_shift_enter_adds_sibling_with_full_body(qtbot):
     panel = MapPanel()
+    panel.set_window_mode_control(visible=True)
     qtbot.addWidget(panel)
     panel.set_content("/Test.md", "# Root\n\n## One\nbody\nlast body line\n\n## Two\n")
     panel._set_selected_node(_node_by_label(panel, "One"))
@@ -910,6 +924,7 @@ def test_review_vi_paging_reaches_focused_reader(qtbot, monkeypatch):
     from sp.app import config
     monkeypatch.setattr(config, "load_vi_mode_enabled", lambda: True)
     panel = MapPanel()
+    panel.set_window_mode_control(visible=True)
     qtbot.addWidget(panel)
     panel.set_content("/Test.md", "# Root\n\n## One\n" + "body\n\n" * 150)
     panel._set_selected_node(_node_by_label(panel, "One"))
@@ -1173,10 +1188,10 @@ def test_body_popup_fits_small_screen_with_buttons_visible(qtbot, monkeypatch):
     assert bounds.contains(popup.frameGeometry())
     assert popup.width() <= 560
     assert popup.height() <= 320
-    for button in popup.findChildren(QPushButton):
+    for button in popup.findChildren(QPushButton, "", Qt.FindDirectChildrenOnly):
         assert popup.rect().contains(button.geometry())
         assert button.isVisible()
-    assert popup.layout().contentsMargins().left() == 6
+    assert popup.layout().contentsMargins().left() == 8
     assert popup.editor.document().documentMargin() == 4
 
 
@@ -1507,6 +1522,7 @@ def test_content_dots_show_own_body_separately_from_child_content(qtbot):
 
 def test_body_popup_click_outside_cancels_without_changing_page_or_undo(qtbot):
     panel = MapPanel()
+    panel.set_window_mode_control(visible=True)
     qtbot.addWidget(panel)
     panel.show()
     original = "# Root\n\n## Parent\nBody\n"
@@ -1533,6 +1549,7 @@ def test_body_popup_click_outside_cancels_without_changing_page_or_undo(qtbot):
 def test_body_popup_internal_clicks_do_not_cancel_and_save_button_still_works(qtbot):
     from PySide6.QtWidgets import QPushButton
     panel = MapPanel()
+    panel.set_window_mode_control(visible=True)
     qtbot.addWidget(panel)
     panel.show()
     panel.set_content("/Test.md", "# Root\n\n## Parent\nBody\n")
@@ -1550,6 +1567,7 @@ def test_body_popup_internal_clicks_do_not_cancel_and_save_button_still_works(qt
 
 def test_body_popup_application_deactivation_cancels_draft(qtbot):
     panel = MapPanel()
+    panel.set_window_mode_control(visible=True)
     qtbot.addWidget(panel)
     panel.set_content("/Test.md", "# Root\n\n## Parent\nBody\n")
     panel._set_selected_node(_node_by_label(panel, "Parent"))

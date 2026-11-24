@@ -252,16 +252,15 @@ class MermaidEditorWindow(QMainWindow):
         from .diagram_editor_header import DiagramEditorHeader
         self.header_controls = DiagramEditorHeader("mermaid", settings_scope, self)
 
-        toolbar_layout = QHBoxLayout()
-        toolbar_layout.setContentsMargins(5, 5, 5, 5)
-
         editor_section = QHBoxLayout()
+        editor_section.setContentsMargins(5, 5, 5, 5)
 
         self.save_btn = QToolButton()
         self.save_btn.setText("Save")
+        self.save_btn.setAccessibleName("Save diagram")
         self.save_btn.setToolTip("Save file (Ctrl+S or Ctrl+Enter)")
         self.save_btn.clicked.connect(self._save_file)
-        editor_section.addWidget(self.save_btn)
+        self.header_controls.add_action(self.save_btn, "save.svg")
 
         editor_zoom_label = QLabel("Zoom:")
         editor_section.addWidget(editor_zoom_label)
@@ -300,10 +299,10 @@ class MermaidEditorWindow(QMainWindow):
         editor_section.addWidget(self.render_status_label)
         self._update_render_status_label()
 
-        toolbar_layout.addLayout(editor_section)
-        toolbar_layout.addStretch()
+        editor_section.addStretch()
 
         preview_section = QHBoxLayout()
+        preview_section.setContentsMargins(5, 0, 5, 0)
 
         self.render_btn = QToolButton()
         self.render_btn.setText("Render")
@@ -357,10 +356,7 @@ class MermaidEditorWindow(QMainWindow):
         self.export_btn.setToolTip("Export diagram as SVG or PNG")
         self.export_btn.clicked.connect(self._show_export_menu)
         preview_section.addWidget(self.export_btn)
-
-        toolbar_layout.addLayout(preview_section)
-
-        self.header_controls.add_row(toolbar_layout)
+        self.header_controls.add_preview_controls(preview_section)
 
         center_widget = QWidget()
         center_layout = QVBoxLayout()
@@ -430,7 +426,8 @@ class MermaidEditorWindow(QMainWindow):
         editor_container = QWidget()
         editor_layout = QVBoxLayout()
         editor_layout.setContentsMargins(0, 0, 0, 0)
-        editor_layout.addWidget(self.editor)
+        editor_layout.addLayout(editor_section)
+        editor_layout.addWidget(self.editor, 1)
         editor_container.setLayout(editor_layout)
         main_h_splitter.addWidget(editor_container)
 
@@ -463,24 +460,28 @@ class MermaidEditorWindow(QMainWindow):
             preview_container = QWidget()
             preview_layout = QVBoxLayout()
             preview_layout.setContentsMargins(0, 0, 0, 0)
+            preview_surface = QWidget()
+            preview_surface_layout = QVBoxLayout(preview_surface)
+            preview_surface_layout.setContentsMargins(0, 0, 0, 0)
+            preview_layout.addWidget(preview_surface, 1)
 
             if self._use_web_preview:
                 web_view_class = _load_qwebengine_view_class()
                 if web_view_class is None:
                     self._use_web_preview = False
                 else:
-                    self.preview_web = web_view_class(preview_container)
+                    self.preview_web = web_view_class(preview_surface)
             if self._use_web_preview and self.preview_web is not None:
                 self.preview_web.setContextMenuPolicy(Qt.NoContextMenu)
                 self.preview_web.installEventFilter(self)
                 self.preview_web.loadStarted.connect(self._on_web_preview_load_started)
                 self.preview_web.loadFinished.connect(self._on_web_preview_load_finished)
                 self.preview_scroll_area.hide()
-                preview_layout.addWidget(self.preview_web)
-                preview_layout.addWidget(self.preview_scroll_area)
+                preview_surface_layout.addWidget(self.preview_web)
+                preview_surface_layout.addWidget(self.preview_scroll_area)
             else:
-                preview_layout.addWidget(self.preview_scroll_area)
-            self.loading_overlay = self._create_loading_overlay(preview_container)
+                preview_surface_layout.addWidget(self.preview_scroll_area)
+            self.loading_overlay = self._create_loading_overlay(preview_surface)
             preview_container.setLayout(preview_layout)
             right_v_splitter.addWidget(preview_container)
 

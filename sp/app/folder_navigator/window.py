@@ -11002,6 +11002,8 @@ class Window(QMainWindow):
                     geometry_scope=f"folder-navigator:{self.root}",
                     initial_geometry=initial_geometry,
                 )
+                if process is None:
+                    return
                 self.excalidraw_processes.append((process, None, path))
                 if not self.excalidraw_process_timer.isActive():
                     self.excalidraw_process_timer.start()

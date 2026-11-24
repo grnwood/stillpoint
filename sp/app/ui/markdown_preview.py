@@ -506,7 +506,7 @@ class MarkdownReadingView(QWidget):
         self._use_theme_colors = self._reading_background == "theme"
         self._host_theme_palette: QPalette | None = None
         self.reading_options = config.load_reading_options()
-        if preference_scope in {"focus", "audience"}:
+        if preference_scope in {"focus", "audience", "page_editor", "map"}:
             preferences = config.load_mode_reading_preferences(preference_scope)
             self._reading_background = preferences["background"]
             self._use_theme_colors = self._reading_background == "theme"

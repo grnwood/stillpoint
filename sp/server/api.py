@@ -6026,6 +6026,21 @@ def list_files(page_path: str) -> dict:
         except OSError:
             pass
 
+    for entry in attachments:
+        if not isinstance(entry, dict):
+            continue
+        path = entry.get("attachment_path")
+        if not path:
+            continue
+        candidate = (root / str(path).lstrip("/")).resolve()
+        try:
+            stat = candidate.stat() if candidate.is_relative_to(root) and candidate.is_file() else None
+            entry["size_bytes"] = stat.st_size if stat else None
+            entry["mtime_ns"] = stat.st_mtime_ns if stat else None
+        except OSError:
+            entry["size_bytes"] = None
+            entry["mtime_ns"] = None
+
     _log_attachment(f"Listed {len(attachments)} attachment(s) for {normalized_page}")
     return {"attachments": attachments}
 

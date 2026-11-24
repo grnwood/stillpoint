@@ -536,7 +536,7 @@ def load_mode_reading_preferences(mode: str) -> dict:
 
 
 def save_mode_reading_preferences(mode: str, *, background=None, options=None) -> None:
-    if mode not in {"focus", "audience"}:
+    if mode not in {"focus", "audience", "page_editor", "map"}:
         raise ValueError("Unknown reading mode")
     preferences = load_mode_reading_preferences(mode)
     if background is not None:
@@ -544,6 +544,17 @@ def save_mode_reading_preferences(mode: str, *, background=None, options=None) -
     if options is not None:
         preferences["options"] = normalize_reading_options(options)
     _update_global_config({f"{mode}_reading": preferences})
+
+
+def load_page_editor_reading_view() -> bool:
+    value = _read_global_config().get("page_editor_reading_view", False)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def save_page_editor_reading_view(enabled: bool) -> None:
+    _update_global_config({"page_editor_reading_view": bool(enabled)})
 
 
 def normalize_reading_options(value) -> dict:
@@ -1149,6 +1160,22 @@ def load_map_note_font_size_offset() -> int:
 def save_map_note_font_size_offset(offset: int) -> None:
     """Save the font size offset for map note previews."""
     _update_global_config({"map_note_font_size_offset": int(offset)})
+
+
+def load_map_content_font_size(view: str, default: int = 12) -> int:
+    if view not in {"read", "edit"}:
+        raise ValueError("Unknown map content view")
+    value = _read_global_config().get(f"map_{view}_font_size", default)
+    try:
+        return max(8, min(36, int(value)))
+    except (TypeError, ValueError, OverflowError):
+        return max(8, min(36, int(default)))
+
+
+def save_map_content_font_size(view: str, size: int) -> None:
+    if view not in {"read", "edit"}:
+        raise ValueError("Unknown map content view")
+    _update_global_config({f"map_{view}_font_size": max(8, min(36, int(size)))})
 
 
 def load_vi_cursor_style() -> str:
