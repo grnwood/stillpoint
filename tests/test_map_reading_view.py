@@ -91,6 +91,33 @@ def test_edit_popup_keeps_rendered_heading_read_only(panel):
     assert "Changed body" in panel._current_markdown
 
 
+def test_reader_to_edit_reuses_heading_without_building_draft_reader(panel, monkeypatch):
+    panel._show_selected_node_note_popup()
+    renders = []
+    reader = panel._content_tooltip.reading_view
+    original_render = reader.set_markdown
+    monkeypatch.setattr(reader, "set_markdown", lambda *args, **kwargs: renders.append(args))
+    QTest.keyClick(reader.browser, Qt.Key_Return)
+    popup = panel._body_editor
+
+    assert renders == []
+    assert popup._reading_view is None
+    assert popup.editor._post_load_paint_guard_until == 0
+    document = popup.heading_view.browser.document()
+    popup.apply_font_sizes(popup._read_font_size, popup._edit_font_size)
+    assert popup.heading_view.browser.document() is document
+    assert popup._reading_view is None
+
+    monkeypatch.setattr(reader, "set_markdown", original_render)
+    popup.editor.setPlainText("Uncommitted draft")
+    QTest.keyClick(popup.editor, Qt.Key_Space, Qt.ControlModifier)
+    assert popup._reading_view is not None
+    assert "Uncommitted draft" in popup.reading_view.browser.toPlainText()
+    QTest.keyClick(popup.reading_view.browser, Qt.Key_Return)
+    assert popup.editor.toPlainText() == "Uncommitted draft"
+    assert popup.heading_view.browser.document() is document
+
+
 @pytest.mark.parametrize("modifier", [Qt.ControlModifier, Qt.MetaModifier])
 def test_ctrl_cmd_space_toggles_reading_editing_without_losing_draft(panel, modifier):
     panel._show_selected_node_note_popup()

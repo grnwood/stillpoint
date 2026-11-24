@@ -1,5 +1,7 @@
 from pathlib import Path
+import time
 
+import pytest
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
@@ -59,6 +61,44 @@ def test_paint_guard_is_inactive_for_fresh_editor_without_load(qapp) -> None:
         assert editor._post_load_paint_guard_active() is False
     finally:
         editor.close()
+
+
+@pytest.mark.parametrize("delay", [120, 180])
+def test_fast_initial_load_still_waits_for_deferred_repaint(qtbot, monkeypatch, delay):
+    monkeypatch.setenv("SP_POST_LOAD_PAINT_GUARD_MS", str(delay))
+    editor = MarkdownEditor()
+    qtbot.addWidget(editor)
+    editor.hide()
+    editor.set_markdown("Initial popup body", fast_initial_load=True)
+    token = editor.current_load_token()
+
+    assert editor._post_load_paint_guard_until == 0
+    assert editor._post_load_paint_guard_active()
+    assert editor._post_load_repaint_token != token
+    editor._deferred_post_load_repaint(token)
+    assert not editor._post_load_paint_guard_active()
+
+    # Requesting the fast path again must not bypass document-reload guards.
+    editor.set_markdown("Replacement body", fast_initial_load=True)
+    assert editor._post_load_paint_guard_until > time.perf_counter()
+    assert editor._post_load_paint_guard_active()
+
+
+@pytest.mark.parametrize("visible", [False, True])
+def test_fast_initial_load_requires_pristine_hidden_editor(qtbot, monkeypatch, visible):
+    monkeypatch.setenv("SP_POST_LOAD_PAINT_GUARD_MS", "180")
+    editor = MarkdownEditor()
+    qtbot.addWidget(editor)
+    if visible:
+        editor.show()
+    else:
+        editor.hide()
+        editor.setPlainText("Existing document")
+
+    editor.set_markdown("Replacement body", fast_initial_load=True)
+
+    assert editor._post_load_paint_guard_until > time.perf_counter()
+    assert editor._post_load_paint_guard_active()
 
 
 def test_paint_guard_blocks_until_repaint_token_set_on_all_platforms(monkeypatch, qapp) -> None:

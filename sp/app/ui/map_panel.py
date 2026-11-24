@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QBuffer, QEasingCurve, QEvent, QIODevice, QPoint, QPointF, QPropertyAnimation, QSize, Qt, Signal, QMimeData, QTimer
-from PySide6.QtGui import QAction, QColor, QCursor, QFontMetrics, QGuiApplication, QIcon, QImage, QKeyEvent, QKeySequence, QMouseEvent, QNativeGestureEvent, QPainter, QPalette, QPixmap, QShortcut, QTextCharFormat, QTextCursor
+from PySide6.QtGui import QAction, QColor, QCursor, QFontMetrics, QGuiApplication, QIcon, QImage, QKeyEvent, QKeySequence, QMouseEvent, QNativeGestureEvent, QPainter, QPalette, QPixmap, QShortcut, QTextCharFormat, QTextCursor, QTextDocument, QTextDocumentFragment
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
@@ -603,6 +603,59 @@ class _InlineNodeRenameEdit(QLineEdit):
         super().keyPressEvent(event)
 
 
+class _MapBodyHeading(QWidget):
+    """A small read-only heading, using the existing reader's rendered block."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self._height_update_pending = False
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.browser = QTextBrowser(self)
+        self.browser.setFrameShape(QFrame.NoFrame)
+        self.browser.setFocusPolicy(Qt.NoFocus)
+        self.browser.setTextInteractionFlags(Qt.NoTextInteraction)
+        self.browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.browser.setOpenLinks(False)
+        layout.addWidget(self.browser)
+        self.setToolTip("Heading (read-only). Use the map controls to rename it.")
+        self.setAccessibleName("Heading (read-only)")
+
+    def copy_heading(self, source: QTextBrowser) -> None:
+        document = QTextDocument(self.browser)
+        document.setDefaultFont(source.document().defaultFont())
+        document.setDocumentMargin(source.document().documentMargin())
+        selection = QTextCursor(source.document().begin())
+        selection.select(QTextCursor.BlockUnderCursor)
+        cursor = QTextCursor(document)
+        cursor.insertFragment(QTextDocumentFragment(selection))
+        palette = self.parentWidget().palette()
+        base, text = palette.color(QPalette.Base), palette.color(QPalette.Text)
+        muted = QColor.fromRgbF(*((a + b) / 2 for a, b in zip(
+            (base.redF(), base.greenF(), base.blueF()), (text.redF(), text.greenF(), text.blueF())
+        )))
+        cursor.select(QTextCursor.Document)
+        fmt = QTextCharFormat()
+        fmt.setForeground(muted)
+        cursor.mergeCharFormat(fmt)
+        self.browser.setDocument(document)
+        document.documentLayout().documentSizeChanged.connect(self._queue_height_update)
+        # The new browser has not received its popup width yet. Measuring its
+        # narrow initial document here would wrap the title and enlarge the popup.
+        block_height = source.document().documentLayout().blockBoundingRect(source.document().begin()).height()
+        self.setFixedHeight(math.ceil(block_height + 2 * document.documentMargin()))
+
+    def _queue_height_update(self, _size) -> None:
+        if not self._height_update_pending:
+            self._height_update_pending = True
+            QTimer.singleShot(0, self, self._fit_height)
+
+    def _fit_height(self) -> None:
+        self._height_update_pending = False
+        self.setFixedHeight(math.ceil(self.browser.document().size().height()))
+
+
 class _MapBodyEditDialog(QDialog):
     saveRequested = Signal()
 
@@ -616,6 +669,8 @@ class _MapBodyEditDialog(QDialog):
         self._edit_font_size = parent._edit_font_size
         self._heading_markdown = heading_markdown
         self._reader_source = parent._content_tooltip._source_editor
+        self._reading_view = None
+        self._heading_render_key = None
         self.setWindowTitle(f"Edit content — {heading}")
         self.setAttribute(Qt.WA_DeleteOnClose)
         layout = QVBoxLayout(self)
@@ -643,30 +698,13 @@ class _MapBodyEditDialog(QDialog):
         self.editor.setPlaceholderText("Write this heading’s content…")
         self.editor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
         self.editor.document().setDocumentMargin(4)
-        self.editor.set_markdown(body)
+        self.editor.set_font_point_size(self._edit_font_size)
+        self.editor.set_markdown(body, fast_initial_load=True)
         if not body:
             self.editor.clear()
         self.editor.installEventFilter(self)
-        self.reading_view = MarkdownReadingView(self, preference_scope="map", enable_table_preview=False)
-        self.reading_view.set_header_visible(False)
-        self.reading_view.set_theme_palette(palette)
-        self.reading_view._apply_reading_options(dict(self.reading_view.reading_options, width="full"))
-        self.reading_view.browser.installEventFilter(self)
-        self.reading_view.browser.viewport().installEventFilter(self)
         self._reading_view_enabled = False
-        self.heading_view = MarkdownReadingView(self, preference_scope="map", enable_table_preview=False)
-        self.heading_view.set_header_visible(False)
-        self.heading_view.set_theme_palette(palette)
-        self.heading_view._apply_reading_options(dict(self.heading_view.reading_options, width="full"))
-        self.heading_view.browser.setFocusPolicy(Qt.NoFocus)
-        self.heading_view.browser.setTextInteractionFlags(Qt.NoTextInteraction)
-        self.heading_view.browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.heading_view.browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.heading_view.setToolTip("Heading (read-only). Use the map controls to rename it.")
-        self.heading_view.setAccessibleName("Heading (read-only)")
-        self.heading_view.browser.document().documentLayout().documentSizeChanged.connect(
-            lambda size: self.heading_view.setFixedHeight(math.ceil(size.height()))
-        )
+        self.heading_view = _MapBodyHeading(self)
         edit_page = QWidget(self)
         edit_layout = QVBoxLayout(edit_page)
         edit_layout.setContentsMargins(0, 0, 0, 0)
@@ -674,12 +712,9 @@ class _MapBodyEditDialog(QDialog):
         edit_layout.addWidget(self.heading_view)
         edit_layout.addWidget(self.editor, 1)
         install_primary_wheel_zoom(self.editor, self._change_font_size)
-        install_primary_wheel_zoom(self.reading_view.browser, self._change_font_size)
         self._stack = QStackedWidget(self)
         self._edit_page = edit_page
         self._stack.addWidget(edit_page)
-        self._stack.addWidget(self.reading_view)
-        self.editor.set_font_point_size(self._edit_font_size)
         self._render_heading()
         layout.addWidget(self._stack, 1)
         self.error_label = QLabel()
@@ -711,6 +746,20 @@ class _MapBodyEditDialog(QDialog):
             shortcut = QShortcut(QKeySequence(sequence), self)
             shortcut.activated.connect(self.reading_toggle.toggle)
 
+    @property
+    def reading_view(self) -> MarkdownReadingView:
+        if self._reading_view is None:
+            view = MarkdownReadingView(self, preference_scope="map", enable_table_preview=False)
+            view.set_header_visible(False)
+            view.set_theme_palette(self.palette())
+            view._apply_reading_options(dict(view.reading_options, width="full"))
+            view.browser.installEventFilter(self)
+            view.browser.viewport().installEventFilter(self)
+            install_primary_wheel_zoom(view.browser, self._change_font_size)
+            self._stack.addWidget(view)
+            self._reading_view = view
+        return self._reading_view
+
     def set_reading_view(self, enabled: bool) -> None:
         self._reading_view_enabled = enabled
         self.header.mode.setText("Reading" if enabled else "Editing")
@@ -738,24 +787,24 @@ class _MapBodyEditDialog(QDialog):
         self.heading_view.setVisible(bool(self._heading_markdown))
         if not self._heading_markdown:
             return
-        self.heading_view.match_editor_layout(self._reader_source)
-        self.heading_view.set_base_font_point_size(self._read_font_size)
-        self.heading_view.set_markdown(self._heading_markdown)
-        # Preserve the reader's heading typography, muting only its color.
-        palette = self.palette()
-        base, text = palette.color(QPalette.Base), palette.color(QPalette.Text)
-        muted = QColor.fromRgbF(*((a + b) / 2 for a, b in zip(
-            (base.redF(), base.greenF(), base.blueF()), (text.redF(), text.greenF(), text.blueF())
-        )))
-        cursor = QTextCursor(self.heading_view.browser.document())
-        cursor.select(QTextCursor.Document)
-        fmt = QTextCharFormat()
-        fmt.setForeground(muted)
-        cursor.mergeCharFormat(fmt)
+        render_key = (self._heading_markdown, self._read_font_size)
+        if render_key == self._heading_render_key:
+            return
+        # Usually the heading is already rendered in the popup we just left.
+        # Direct-to-edit entry can render it with that same, persistent reader.
+        reader = self.parentWidget()._content_tooltip.reading_view
+        if (reader.last_markdown.splitlines()[:1] != [self._heading_markdown]
+                or reader._base_font_point_size != self._read_font_size):
+            reader.match_editor_layout(self._reader_source)
+            reader.set_base_font_point_size(self._read_font_size)
+            reader.set_markdown(self._heading_markdown)
+        self.heading_view.copy_heading(reader.browser)
+        self._heading_render_key = render_key
 
     def apply_font_sizes(self, reading: int, editing: int) -> None:
         self._read_font_size, self._edit_font_size = reading, editing
-        self.editor.set_font_point_size(editing)
+        if self.editor.font().pointSize() != editing:
+            self.editor.set_font_point_size(editing)
         self._render_heading()
         if self._reading_view_enabled:
             line, screen_y = self.reading_view.reading_view_position()
@@ -764,7 +813,8 @@ class _MapBodyEditDialog(QDialog):
             self.reading_view.set_markdown(self._draft_markdown(), source_line=line, anchor_global_y=screen_y)
 
     def eventFilter(self, watched, event):
-        if (watched is self.reading_view.browser.viewport() and self._reading_view_enabled
+        reader = self._reading_view.browser if self._reading_view is not None else None
+        if (reader is not None and watched is reader.viewport() and self._reading_view_enabled
                 and event.type() == QEvent.MouseButtonDblClick and event.button() == Qt.LeftButton):
             self.set_reading_view(False)
             return True
@@ -775,7 +825,7 @@ class _MapBodyEditDialog(QDialog):
         if self.isVisible() and event.type() == QEvent.ApplicationDeactivate:
             self.reject()
             return False
-        if watched in (self.editor, self.reading_view.browser) and event.type() in (QEvent.ShortcutOverride, QEvent.KeyPress):
+        if watched in (self.editor, reader) and event.type() in (QEvent.ShortcutOverride, QEvent.KeyPress):
             mods = event.modifiers() & ~Qt.KeypadModifier
             toggle = event.key() == Qt.Key_Space and mods in (Qt.ControlModifier, Qt.MetaModifier)
             edit = self._reading_view_enabled and event.key() in (Qt.Key_Return, Qt.Key_Enter) and not mods

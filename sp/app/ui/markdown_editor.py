@@ -2391,11 +2391,16 @@ class MarkdownEditor(QTextEdit):
         self._post_load_repaint_armed = False
         return load_token
 
-    def _finish_page_load(self, load_token: int) -> None:
+    def _finish_page_load(self, load_token: int, *, fast_initial_load: bool = False) -> None:
         if not self._is_current_load_token(load_token):
             return
         self._load_in_flight_token = 0
-        self._arm_post_load_paint_guard(load_token)
+        if fast_initial_load:
+            # A new, hidden editor has no previously painted document to race
+            # with. Still wait for the deferred repaint token before painting.
+            self._queue_post_load_repaint(load_token)
+        else:
+            self._arm_post_load_paint_guard(load_token)
 
     def _queue_post_load_repaint(self, load_token: Optional[int]) -> None:
         if not self._is_current_load_token(load_token):
@@ -2912,7 +2917,11 @@ class MarkdownEditor(QTextEdit):
             self._page_load_logger = None
             self._post_load_logger_token = 0
 
-    def set_markdown(self, content: str) -> None:
+    def set_markdown(self, content: str, *, fast_initial_load: bool = False) -> None:
+        # This shorter handoff is only safe for a pristine, hidden editor.
+        # Reloads and visible document replacements retain the normal delay.
+        fast_initial_load = (fast_initial_load and self.current_load_token() == 0
+                             and self.document().isEmpty() and not self.isVisible())
         self._push_paint_block()
         # Show busy cursor during page load/rendering
         QGuiApplication.setOverrideCursor(Qt.WaitCursor)
@@ -3077,7 +3086,7 @@ class MarkdownEditor(QTextEdit):
                         self._cursor_signals_connected = True
                     except Exception:
                         pass
-                self._finish_page_load(load_token)
+                self._finish_page_load(load_token, fast_initial_load=fast_initial_load)
                 self._pop_paint_block()
             t5 = time.perf_counter()
             self._mark_page_load("outline + margin scheduled", load_token)
