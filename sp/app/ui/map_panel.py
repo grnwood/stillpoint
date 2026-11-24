@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QBuffer, QEasingCurve, QEvent, QIODevice, QPoint, QPointF, QPropertyAnimation, QSize, Qt, Signal, QMimeData, QTimer
-from PySide6.QtGui import QAction, QColor, QCursor, QFontMetrics, QGuiApplication, QIcon, QImage, QKeyEvent, QKeySequence, QMouseEvent, QNativeGestureEvent, QPainter, QPalette, QPixmap, QShortcut
+from PySide6.QtGui import QAction, QColor, QCursor, QFontMetrics, QGuiApplication, QIcon, QImage, QKeyEvent, QKeySequence, QMouseEvent, QNativeGestureEvent, QPainter, QPalette, QPixmap, QShortcut, QTextCharFormat, QTextCursor
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
@@ -606,7 +606,7 @@ class _InlineNodeRenameEdit(QLineEdit):
 class _MapBodyEditDialog(QDialog):
     saveRequested = Signal()
 
-    def __init__(self, parent: QWidget, heading: str, body: str) -> None:
+    def __init__(self, parent: QWidget, heading: str, body: str, *, heading_markdown: str = "") -> None:
         super().__init__(parent, Qt.Tool | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint)
         self.setObjectName("mapBodyEditor")
         palette = parent._content_tooltip.palette()
@@ -614,13 +614,15 @@ class _MapBodyEditDialog(QDialog):
         self.setStyleSheet(_map_note_popup_style(self.objectName(), palette))
         self._read_font_size = parent._read_font_size
         self._edit_font_size = parent._edit_font_size
+        self._heading_markdown = heading_markdown
+        self._reader_source = parent._content_tooltip._source_editor
         self.setWindowTitle(f"Edit content — {heading}")
         self.setAttribute(Qt.WA_DeleteOnClose)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(4)
         vi = config.load_vi_mode_enabled()
-        self._edit_hint = "Ctrl/Cmd+Space previews · Ctrl+Enter saves · " + ("Vi: i edits · Esc exits insert, then cancels" if vi else "Esc cancels") + " · Click outside cancels"
+        self._edit_hint = "Ctrl/Cmd+Space previews · Ctrl/Cmd+Enter saves · " + ("Vi: i edits · Esc exits insert, then cancels" if vi else "Esc cancels") + " · Click outside cancels"
         self.hint = QLabel(self._edit_hint)
         self.hint.setObjectName("mapNoteHint")
         self.hint.setWordWrap(True)
@@ -639,6 +641,7 @@ class _MapBodyEditDialog(QDialog):
         self.editor.set_task_hover_edit_enabled(False)
         self.editor.set_vi_mode_enabled(vi)
         self.editor.setPlaceholderText("Write this heading’s content…")
+        self.editor.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
         self.editor.document().setDocumentMargin(4)
         self.editor.set_markdown(body)
         if not body:
@@ -651,12 +654,33 @@ class _MapBodyEditDialog(QDialog):
         self.reading_view.browser.installEventFilter(self)
         self.reading_view.browser.viewport().installEventFilter(self)
         self._reading_view_enabled = False
+        self.heading_view = MarkdownReadingView(self, preference_scope="map", enable_table_preview=False)
+        self.heading_view.set_header_visible(False)
+        self.heading_view.set_theme_palette(palette)
+        self.heading_view._apply_reading_options(dict(self.heading_view.reading_options, width="full"))
+        self.heading_view.browser.setFocusPolicy(Qt.NoFocus)
+        self.heading_view.browser.setTextInteractionFlags(Qt.NoTextInteraction)
+        self.heading_view.browser.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.heading_view.browser.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.heading_view.setToolTip("Heading (read-only). Use the map controls to rename it.")
+        self.heading_view.setAccessibleName("Heading (read-only)")
+        self.heading_view.browser.document().documentLayout().documentSizeChanged.connect(
+            lambda size: self.heading_view.setFixedHeight(math.ceil(size.height()))
+        )
+        edit_page = QWidget(self)
+        edit_layout = QVBoxLayout(edit_page)
+        edit_layout.setContentsMargins(0, 0, 0, 0)
+        edit_layout.setSpacing(0)
+        edit_layout.addWidget(self.heading_view)
+        edit_layout.addWidget(self.editor, 1)
         install_primary_wheel_zoom(self.editor, self._change_font_size)
         install_primary_wheel_zoom(self.reading_view.browser, self._change_font_size)
         self._stack = QStackedWidget(self)
-        self._stack.addWidget(self.editor)
+        self._edit_page = edit_page
+        self._stack.addWidget(edit_page)
         self._stack.addWidget(self.reading_view)
         self.editor.set_font_point_size(self._edit_font_size)
+        self._render_heading()
         layout.addWidget(self._stack, 1)
         self.error_label = QLabel()
         self.error_label.setWordWrap(True)
@@ -675,12 +699,12 @@ class _MapBodyEditDialog(QDialog):
         cancel.setAutoDefault(False)
         cancel.clicked.connect(self.reject)
         buttons.addWidget(cancel)
-        save = QPushButton("Save (Ctrl+Enter)")
+        save = QPushButton("Save (Ctrl/Cmd+Enter)")
         save.setAutoDefault(False)
         save.clicked.connect(self.saveRequested.emit)
         buttons.addWidget(save)
         layout.addLayout(buttons)
-        for sequence in ("Ctrl+Return", "Ctrl+Enter"):
+        for sequence in ("Ctrl+Return", "Ctrl+Enter", "Meta+Return", "Meta+Enter"):
             shortcut = QShortcut(QKeySequence(sequence), self)
             shortcut.activated.connect(self.saveRequested.emit)
         for sequence in ("Ctrl+Space", "Meta+Space"):
@@ -691,11 +715,11 @@ class _MapBodyEditDialog(QDialog):
         self._reading_view_enabled = enabled
         self.header.mode.setText("Reading" if enabled else "Editing")
         if enabled:
-            self.reading_view.match_editor_layout(self.editor)
+            self.reading_view.match_editor_layout(self._reader_source)
             self.reading_view.set_base_font_point_size(self._read_font_size)
             self.reading_view.set_vi_enabled(config.load_vi_mode_enabled())
-            self.reading_view.set_markdown(self.editor.to_markdown())
-        self._stack.setCurrentWidget(self.reading_view if enabled else self.editor)
+            self.reading_view.set_markdown(self._draft_markdown())
+        self._stack.setCurrentWidget(self.reading_view if enabled else self._edit_page)
         self.reading_toggle.blockSignals(True)
         self.reading_toggle.setChecked(enabled)
         self.reading_toggle.blockSignals(False)
@@ -707,14 +731,37 @@ class _MapBodyEditDialog(QDialog):
     def _change_font_size(self, delta: int) -> None:
         self.parentWidget()._change_map_font_size(delta, reading=self._reading_view_enabled)
 
+    def _draft_markdown(self) -> str:
+        return f"{self._heading_markdown}\n\n{self.editor.to_markdown()}" if self._heading_markdown else self.editor.to_markdown()
+
+    def _render_heading(self) -> None:
+        self.heading_view.setVisible(bool(self._heading_markdown))
+        if not self._heading_markdown:
+            return
+        self.heading_view.match_editor_layout(self._reader_source)
+        self.heading_view.set_base_font_point_size(self._read_font_size)
+        self.heading_view.set_markdown(self._heading_markdown)
+        # Preserve the reader's heading typography, muting only its color.
+        palette = self.palette()
+        base, text = palette.color(QPalette.Base), palette.color(QPalette.Text)
+        muted = QColor.fromRgbF(*((a + b) / 2 for a, b in zip(
+            (base.redF(), base.greenF(), base.blueF()), (text.redF(), text.greenF(), text.blueF())
+        )))
+        cursor = QTextCursor(self.heading_view.browser.document())
+        cursor.select(QTextCursor.Document)
+        fmt = QTextCharFormat()
+        fmt.setForeground(muted)
+        cursor.mergeCharFormat(fmt)
+
     def apply_font_sizes(self, reading: int, editing: int) -> None:
         self._read_font_size, self._edit_font_size = reading, editing
         self.editor.set_font_point_size(editing)
+        self._render_heading()
         if self._reading_view_enabled:
             line, screen_y = self.reading_view.reading_view_position()
-            self.reading_view.match_editor_layout(self.editor)
+            self.reading_view.match_editor_layout(self._reader_source)
             self.reading_view.set_base_font_point_size(reading)
-            self.reading_view.set_markdown(self.editor.to_markdown(), source_line=line, anchor_global_y=screen_y)
+            self.reading_view.set_markdown(self._draft_markdown(), source_line=line, anchor_global_y=screen_y)
 
     def eventFilter(self, watched, event):
         if (watched is self.reading_view.browser.viewport() and self._reading_view_enabled
@@ -737,7 +784,9 @@ class _MapBodyEditDialog(QDialog):
                 if event.type() == QEvent.KeyPress:
                     self.set_reading_view(not self._reading_view_enabled if toggle else False)
                 return True
-            save = event.key() in (Qt.Key_Return, Qt.Key_Enter) and event.modifiers() == Qt.ControlModifier
+            # Qt swaps Control and Meta on macOS; accept either physical key,
+            # including the keypad Enter variant normalized above.
+            save = event.key() in (Qt.Key_Return, Qt.Key_Enter) and mods in (Qt.ControlModifier, Qt.MetaModifier)
             cancel = event.key() == Qt.Key_Escape and not event.modifiers()
             if save or cancel:
                 event.accept()
@@ -2307,7 +2356,8 @@ class MapPanel(QWidget):
         start = node.line_number if node.depth > 0 or self._root_is_page_h1 else 0
         end = min((child.line_number - 1 for child in node.children if child.line_number > 0), default=node.section_end_line)
         initial_body = "".join(lines[start:end])
-        popup = _MapBodyEditDialog(self, node.heading_text or node.label, initial_body)
+        heading_markdown = lines[start - 1].strip() if start > 0 else ""
+        popup = _MapBodyEditDialog(self, node.heading_text or node.label, initial_body, heading_markdown=heading_markdown)
         initial_editor_text = popup.editor.toPlainText()
         self._body_editor = popup
         self._update_tooltip_font_size()
@@ -3701,7 +3751,7 @@ class MapPanel(QWidget):
         header = "<th>Action</th><th>Standard keys</th>" + ("<th>Vi keys</th>" if vi else "")
         body = "".join("<tr>" + "".join(f"<td>{html.escape(cell)}</td>" for cell in row[:3 if vi else 2]) + "</tr>" for row in rows if vi or row[1] != "—")
         review_help = (
-            "<p>In the body editor: Ctrl+Enter saves; Esc or clicking outside cancels. In vi insert mode, Esc returns to navigation first. Child headings stay separate.</p>"
+            "<p>In the body editor: Ctrl/Cmd+Enter saves; Esc or clicking outside cancels. In vi insert mode, Esc returns to navigation first. Child headings stay separate.</p>"
             if self._detached_window else
             "<p>Click a node or press Enter to scroll the main editor to that section. Node previews and body editing are available in the full-screen map.</p>"
         )

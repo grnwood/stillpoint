@@ -63,6 +63,34 @@ def test_double_click_reading_popup_enters_edit_mode(panel):
     assert panel._body_editor.editor.isVisible()
 
 
+def test_edit_popup_keeps_rendered_heading_read_only(panel):
+    panel._show_selected_node_note_popup()
+    reader = panel._content_tooltip._editor
+    heading_format = reader.document().begin().begin().fragment().charFormat()
+    QTest.keyClick(reader, Qt.Key_Return)
+    popup = panel._body_editor
+    heading = popup.heading_view.browser
+    edit_format = heading.document().begin().begin().fragment().charFormat()
+
+    assert heading.toPlainText().replace("\u200b", "") == "Details"
+    assert heading.isReadOnly()
+    assert heading.textInteractionFlags() == Qt.NoTextInteraction
+    assert "read-only" in popup.heading_view.toolTip()
+    assert edit_format.fontPointSize() == heading_format.fontPointSize()
+    assert edit_format.fontWeight() == heading_format.fontWeight()
+    assert edit_format.foreground().color() != heading_format.foreground().color()
+    assert "Details" not in popup.editor.toPlainText()
+
+    popup.set_reading_view(True)
+    assert popup.reading_view.browser.document().begin().text().replace("\u200b", "") == "Details"
+    popup.set_reading_view(False)
+    assert popup.heading_view.isVisible()
+    popup.editor.setPlainText("Changed body")
+    QTest.keyClick(popup.editor, Qt.Key_Return, Qt.ControlModifier)
+    assert panel._current_markdown.count("## Details") == 1
+    assert "Changed body" in panel._current_markdown
+
+
 @pytest.mark.parametrize("modifier", [Qt.ControlModifier, Qt.MetaModifier])
 def test_ctrl_cmd_space_toggles_reading_editing_without_losing_draft(panel, modifier):
     panel._show_selected_node_note_popup()
@@ -99,6 +127,27 @@ def test_draft_reading_view_can_return_to_editing(panel, trigger):
         QTest.mouseDClick(popup.reading_view.browser.viewport(), Qt.LeftButton, pos=QPoint(30, 30))
     assert not popup._reading_view_enabled
     assert popup.editor.isVisible()
+
+
+@pytest.mark.parametrize("reading", [False, True])
+@pytest.mark.parametrize("key", [Qt.Key_Return, Qt.Key_Enter])
+@pytest.mark.parametrize("modifier", [Qt.ControlModifier, Qt.MetaModifier])
+@pytest.mark.parametrize("keypad", [Qt.NoModifier, Qt.KeypadModifier])
+def test_body_popup_save_shortcut(panel, reading, key, modifier, keypad):
+    panel._edit_selected_body()
+    popup = panel._body_editor
+    popup.editor.setPlainText("Saved with the keyboard")
+    popup.set_reading_view(reading)
+    target = popup.reading_view.browser if reading else popup.editor
+    saves = []
+    panel.headingReorderRequested.connect(lambda *args: saves.append(args))
+
+    QTest.keyClick(target, key, modifier | keypad)
+
+    assert panel._body_editor is None
+    assert "Saved with the keyboard" in panel._current_markdown
+    assert "Keep child content." in panel._current_markdown
+    assert len(saves) == 1
 
 
 def test_enter_from_reader_starts_vi_insert_mode(panel, monkeypatch):
