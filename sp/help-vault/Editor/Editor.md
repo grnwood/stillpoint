@@ -131,3 +131,7 @@ Example:
 - Use headings early so pages stay easy to scan.
 - Keep tasks close to the notes they belong to.
 - Add tags only when you feel real grouping pain.
+
+## Voice Notes and Screen Recording
+
+Use the microphone or video-record icon beside Print, the matching buttons in Attachments, or **Record Voice Note** / **Record Screen** in the command palette. Recordings attach to the page where you started. See [:Recording] for recording, playback, transcription, tray controls, and global pause/stop shortcuts.

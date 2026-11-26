@@ -234,7 +234,9 @@ class AttachmentsPanel(QWidget):
         self._remote_cache_key: Optional[str] = None
         self._remote_vault_root: Optional[Path] = None
         self._voice_dialog = None
+        self._screen_dialog = None
         self._audio_player = None
+        self._video_player = None
         
         self.current_page_path: Optional[Path] = None
         self.zoom_level = 0  # 0=list, 1=small icons, 2=medium icons, 3=large icons
@@ -272,6 +274,14 @@ class AttachmentsPanel(QWidget):
         self.record_button.setEnabled(False)
         self.record_button.clicked.connect(self._record_voice_note)
         toolbar.addWidget(self.record_button)
+
+        self.screen_record_button = QToolButton()
+        self._set_toolbar_icon(self.screen_record_button, "video-record.svg", QColor("#e53935"))
+        self.screen_record_button.setToolTip("Record screen")
+        self.screen_record_button.setAccessibleName("Record screen")
+        self.screen_record_button.setEnabled(False)
+        self.screen_record_button.clicked.connect(self._record_screen)
+        toolbar.addWidget(self.screen_record_button)
 
         self.remove_button = QToolButton()
         self.remove_button.setText("−")
@@ -421,6 +431,7 @@ class AttachmentsPanel(QWidget):
     def set_remote_mode(self, remote_mode: bool, api_base: Optional[str]) -> None:
         """Toggle remote mode for attachments."""
         self._remote_mode = bool(remote_mode)
+        self.screen_record_button.setEnabled(not self._remote_mode and self.current_page_path is not None)
         self._api_base = api_base.rstrip("/") if api_base else None
         self._remote_cache_root = None
         self._remote_cache_key = None
@@ -442,6 +453,7 @@ class AttachmentsPanel(QWidget):
         """Refresh the list of attachments for the current page."""
         t0 = time.perf_counter()
         self.record_button.setEnabled(False)
+        self.screen_record_button.setEnabled(False)
         self.attachments_list.clear()
         self.empty_label.setText("No attachments.")
         self.empty_label.show()
@@ -479,6 +491,7 @@ class AttachmentsPanel(QWidget):
         self.refresh_button.setEnabled(True)
         self.add_button.setEnabled(True)
         self.record_button.setEnabled(True)
+        self.screen_record_button.setEnabled(True)
         
         # Update view mode based on zoom level
         self._update_view_mode()
@@ -546,6 +559,7 @@ class AttachmentsPanel(QWidget):
         self.refresh_button.setEnabled(True)
         self.add_button.setEnabled(True)
         self.record_button.setEnabled(True)
+        self.screen_record_button.setEnabled(False)
         self._update_view_mode()
         try:
             resp = self._http_client.get("/files/", params={"page_path": page_key})
@@ -771,6 +785,7 @@ class AttachmentsPanel(QWidget):
             self._update_hidden_files_icon()
             self._update_thumbnails_icon()
             self._set_toolbar_icon(self.record_button, "microphone.svg", QColor("#e53935"))
+            self._set_toolbar_icon(self.screen_record_button, "video-record.svg", QColor("#e53935"))
 
     def _get_remote_cache_root(self) -> Optional[Path]:
         if not self._api_base:
@@ -815,16 +830,36 @@ class AttachmentsPanel(QWidget):
         return names
 
     def _record_voice_note(self) -> None:
+        self._record_attachment("voice")
+
+    def _record_screen(self, *, auto_start=False) -> None:
+        if not self._remote_mode:
+            self._record_attachment("screen", auto_start=auto_start)
+
+    def _record_attachment(self, kind: str, *, auto_start=False) -> None:
+        if kind == "screen" and self._remote_mode:
+            return
         if not self.current_page_path:
             return
-        if self._voice_dialog is not None:
-            self._voice_dialog.raise_()
-            self._voice_dialog.activateWindow()
-            return
+        dialog_attribute = "_screen_dialog" if kind == "screen" else "_voice_dialog"
+        existing = getattr(self, dialog_attribute)
+        if existing is not None:
+            if auto_start and existing._state == "idle" and getattr(existing, "_attachment_page", None) != self.current_page_path:
+                existing.reject()
+            else:
+                existing.show()
+                existing.raise_()
+                existing.activateWindow()
+                if auto_start and existing._state == "idle":
+                    existing._record()
+                return
         try:
-            from .voice_note_dialog import VoiceNoteDialog
+            if kind == "screen":
+                from .screen_record_dialog import ScreenRecordDialog as RecordingDialog
+            else:
+                from .voice_note_dialog import VoiceNoteDialog as RecordingDialog
         except (ImportError, RuntimeError) as exc:
-            QMessageBox.warning(self, "Voice recording unavailable", f"Qt Multimedia could not be loaded: {exc}")
+            QMessageBox.warning(self, "Recording unavailable", f"Qt Multimedia could not be loaded: {exc}")
             return
         # Bind the destination now; a later page/vault switch must never redirect
         # a recording. The worker uses these snapshots, not mutable panel state.
@@ -865,9 +900,13 @@ class AttachmentsPanel(QWidget):
         from .path_utils import path_to_colon
 
         page_link = path_to_colon(page_key or page.name)
-        dialog = VoiceNoteDialog(self, page_link, save_attachment,
-                                 auth_prompt=self._auth_prompt if remote else None)
-        self._voice_dialog = dialog
+        if kind == "screen":
+            dialog = RecordingDialog(self, page_link, save_attachment)
+            dialog._attachment_page = page
+        else:
+            dialog = RecordingDialog(self, page_link, save_attachment,
+                                     auth_prompt=self._auth_prompt if remote else None)
+        setattr(self, dialog_attribute, dialog)
 
         def saved(filename):
             if self.current_page_path == page and self._remote_mode == remote:
@@ -878,11 +917,15 @@ class AttachmentsPanel(QWidget):
                         self.attachments_list.setCurrentItem(item)
                         break
             if not remote:
-                self.attachmentsModified.emit("voice note recorded")
+                self.attachmentsModified.emit("screen recording saved" if kind == "screen" else "voice note recorded")
 
         dialog.attachmentSaved.connect(saved)
-        dialog.finished.connect(lambda _result: setattr(self, "_voice_dialog", None))
+        dialog.finished.connect(lambda _result: setattr(self, dialog_attribute, None))
         dialog.show()
+        if auto_start:
+            dialog.raise_()
+            dialog.activateWindow()
+            QTimer.singleShot(0, dialog._record)
 
     def _add_attachments(self) -> None:
         """Prompt user to add attachments via the OS file picker."""
@@ -1192,6 +1235,9 @@ class AttachmentsPanel(QWidget):
         if path and Path(path).suffix.lower() in _ATTACHMENT_TYPES["Audio"]:
             self._play_audio_attachment(path)
             return
+        if path and Path(path).suffix.lower() in _ATTACHMENT_TYPES["Video"]:
+            self._play_audio_attachment(path, video=True)
+            return
         mermaid_suffixes = {".mmd", ".mermaid"}
         if self._remote_mode and isinstance(data, dict):
             rel_path = data.get("path")
@@ -1245,7 +1291,7 @@ class AttachmentsPanel(QWidget):
                         print(f"[Attachments] Double-click non-puml -> open default: {data}")
                     open_path_in_system(file_path)
 
-    def _play_audio_attachment(self, path: str) -> None:
+    def _play_audio_attachment(self, path: str, *, video=False) -> None:
         if self._remote_mode and self._http_client is None:
             return
         try:
@@ -1253,10 +1299,12 @@ class AttachmentsPanel(QWidget):
         except (ImportError, RuntimeError) as exc:
             QMessageBox.warning(self, "Audio playback unavailable", f"Qt Multimedia could not be loaded: {exc}")
             return
-        if self._audio_player is None:
-            self._audio_player = AudioPlayerDialog(self)
-            self._audio_player.finished.connect(lambda _result: setattr(self, "_audio_player", None))
-        dialog = self._audio_player
+        attribute = "_video_player" if video else "_audio_player"
+        if getattr(self, attribute) is None:
+            player = AudioPlayerDialog(self, video=True) if video else AudioPlayerDialog(self)
+            setattr(self, attribute, player)
+            player.finished.connect(lambda _result: setattr(self, attribute, None))
+        dialog = getattr(self, attribute)
         if self._remote_mode:
             dialog.open_remote(self._http_client, path, self._auth_prompt)
         else:

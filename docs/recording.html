@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <script src="ga.js"></script>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>StillPoint Voice Notes and Screen Recording</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Fraunces:wght@400;600&family=Source+Sans+3:wght@300;400;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="site.css" />
+    <script src="site.js" defer></script>
+</head>
+  <body>
+    <header class="site-header">
+      <div class="nav">
+        <div class="brand"><img src="img/stillpoint-logo.png" alt="StillPoint logo" class="brand-logo" />StillPoint</div>
+        <button class="nav-toggle" type="button" aria-label="Toggle navigation" aria-expanded="false"><span class="nav-toggle-icon" aria-hidden="true"></span></button>
+        <nav class="nav-links">
+          <a href="index.html">Home</a>
+          <a href="philo.html">Philosophy</a>
+          <a href="cal.html">Journal</a>
+          <a href="tasks.html">Tasks</a>
+          <a href="editing.html">Editing</a>
+          <a href="modes.html">Focus Modes</a>
+          <a href="mindmap.html">Mindmap</a>
+          <a href="thegraph.html">The Graph</a>
+          <a href="dia.html">Diagramming</a>
+          <a href="uses.html">Use Cases</a>
+          <a href="remote-vaults.html">Sync &amp; Sharing</a>
+          <a href="ai.html">AI Infused</a>
+          <a href="howitcompares.html">Comparisons</a>
+          <a href="power.html">Power</a>
+          <a href="folder-navigator.html">Folder Navigator</a>
+        </nav>
+      </div>
+    </header>
+
+    <main class="page">
+      <section class="hero reveal" style="--d: 0.05s">
+        <div>
+          <span class="pill">Voice &amp; video</span>
+          <h1>Capture the explanation beside the page.</h1>
+          <p>Record a spoken thought or a screen walkthrough and keep it as an ordinary attachment in your local vault.</p>
+          <div class="cta-row">
+            <a class="button" href="#voice">Record a voice note</a>
+            <a class="button ghost" href="#screen">Record the screen</a>
+          </div>
+        </div>
+        <div class="card">
+          <h2>Start from the page.</h2>
+          <ol>
+            <li>Open a page in a writable local vault.</li>
+            <li>Choose the microphone or video-record icon beside Print, or in Attachments.</li>
+            <li>Record, review, and save to that page.</li>
+          </ol>
+          <p>The recorder displays a destination such as <code>Projects:Demo</code>. It stays bound to that page if you navigate elsewhere.</p>
+        </div>
+      </section>
+
+      <section id="voice" class="section reveal" style="--d: 0.1s">
+        <div class="eyebrow">Voice notes</div>
+        <h2>Speak now. Keep the context.</h2>
+        <p>Click the microphone, or choose <strong>Record Voice Note</strong> in the command palette. The Attachments panel opens alongside the recorder. Opening it does not start microphone capture.</p>
+        <ol>
+          <li>Select a microphone and press Record. Watch the input-level meter while speaking.</li>
+          <li>Pause and resume as needed, then Stop. Press Play to review.</li>
+          <li>Choose M4A for compact audio when AAC encoding is available, or WAV for uncompressed audio.</li>
+          <li>Press Save to attach the recording to the original page.</li>
+        </ol>
+        <p>Double-click an audio attachment for playback with seeking and volume controls. If saving fails, the draft is retained for retry. Discarding captured audio requires confirmation.</p>
+        <div class="card">
+          <h3>Optional transcription</h3>
+          <p>Choose a transcription server and speech-to-text model in <strong>Preferences → Audio</strong>, then open an audio attachment and press <strong>Transcribe</strong>. This sends the recording to your configured server. Copy the resulting text or save a transcript. Recording and playback do not require transcription.</p>
+        </div>
+      </section>
+
+      <section id="screen" class="section reveal" style="--d: 0.15s">
+        <div class="eyebrow">Screen recording</div>
+        <h2>Show the steps, with optional narration.</h2>
+        <ol>
+          <li>Click the video-record icon, or choose <strong>Record Screen</strong> in the command palette.</li>
+          <li>Select a display and preview it. On Wayland, Choose screen opens the desktop screen-sharing picker.</li>
+          <li>Leave Microphone Off for silent video, or select a microphone for narration. System audio is not recorded.</li>
+          <li>Press Record and approve any desktop shortcut prompt. A large animated <strong>3 → 2 → 1</strong> countdown precedes recording.</li>
+          <li>The window shrinks into a movable recording bar. Its timer and pulsing red indicator show recording; steady amber means paused.</li>
+          <li>Stop, review the video, and press <strong>Save attachment</strong>. Stopping does not automatically save the attachment.</li>
+        </ol>
+        <p>The bar starts at the bottom center of the selected display and remembers where you drag it. MP4 is preferred; available encoders determine the actual format, with fallback when an encoder fails before recording any media. Save failures retain the draft and show its location.</p>
+        <p>Double-click a video attachment to play it inside StillPoint.</p>
+      </section>
+
+      <section id="tray" class="section reveal" style="--d: 0.2s">
+        <div class="eyebrow">Stay in control</div>
+        <h2>Use the tray. Keep the bar optional.</h2>
+        <div class="grid">
+          <div class="card">
+            <h3>Steady recording status</h3>
+            <p>The system tray/menu-bar icon is red while recording and amber while paused. Its recording menu shows elapsed time and offers Pause/Resume and Stop and review.</p>
+          </div>
+          <div class="card">
+            <h3>Hide the floating controls</h3>
+            <p>Turn off Show recording bar in the tray menu. That preference is remembered. A temporary recording tray icon is provided when the normal icon is disabled; without a usable tray, the bar remains available.</p>
+          </div>
+          <div class="card">
+            <h3>Review after capture ends</h3>
+            <p>Stop and review ends capture before opening playback. Whole-screen capture can include the floating bar, OS panel, and open tray menus. Hide the bar and use a global stop shortcut to avoid opening a menu in the video.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="shortcuts" class="section reveal" style="--d: 0.25s">
+        <div class="eyebrow">Global shortcuts</div>
+        <h2>Start, pause, or stop while another app has focus.</h2>
+        <div class="grid">
+          <div class="card">
+            <h3>Start on the current page</h3>
+            <p>Windows and Linux: <kbd>Ctrl+Alt+Shift+R</kbd></p>
+            <p>macOS: <kbd>Control+Option+Shift+R</kbd></p>
+          </div>
+          <div class="card">
+            <h3>Pause / resume</h3>
+            <p>Windows and Linux: <kbd>Ctrl+Alt+Shift+P</kbd></p>
+            <p>macOS: <kbd>Control+Option+Shift+P</kbd></p>
+          </div>
+          <div class="card">
+            <h3>Stop and review</h3>
+            <p>Windows and Linux: <kbd>Ctrl+Alt+Shift+S</kbd></p>
+            <p>macOS: <kbd>Control+Option+Shift+S</kbd></p>
+          </div>
+        </div>
+        <p>Start stays registered while StillPoint is running. Pause and stop are registered for an active screen recording and released when it ends. These bindings do not control voice notes. On macOS, Control is the physical Control key, not Command; R, P, and S refer to ANSI key positions.</p>
+        <p>Start targets the current writable local page in the most recently focused StillPoint window and reuses your last screen and microphone choices. The countdown and permission checks still apply. Missing saved devices require a replacement, and active recordings or unsaved reviews are preserved. Wayland still opens the system screen picker.</p>
+        <p>Wayland uses the desktop Global Shortcuts portal, which may ask you to approve or choose bindings. The tray menu reports the actual granted bindings. Conflicting shortcuts, denied permissions, and unsupported desktops are reported; the bar and tray remain available.</p>
+      </section>
+
+      <section id="requirements" class="section reveal" style="--d: 0.3s">
+        <div class="eyebrow">Platforms &amp; permissions</div>
+        <h2>Local files, native desktop capabilities.</h2>
+        <ul>
+          <li>Screen recording uses Qt Multimedia's FFmpeg backend. Source installs need PySide6 6.8 or newer and the project's requirements.</li>
+          <li>On newer Wayland desktops, global-shortcut permission requires an installed application identity. The Linux installer supplies a hidden <code>app.stillpoint.StillPoint.desktop</code> entry; rerun it after updating a packaged build.</li>
+          <li>Windows and macOS use native global-hotkey APIs. Linux X11 uses key grabs; Wayland uses the Global Shortcuts portal.</li>
+          <li>Qt's Wayland screen capture is experimental and requires PipeWire and a compatible screen-sharing portal. Global shortcuts additionally need a desktop portal backend implementing Global Shortcuts.</li>
+          <li>On macOS, grant screen-recording permission in System Settings → Privacy &amp; Security. Voice notes and narration also need microphone permission. Source development should use <code>venv/bin/python tools/run-macos-dev.py</code>.</li>
+          <li>If capture, an encoder, or saving fails, read the recorder's message and preserve the draft before discarding it. Screen recording supports local vaults.</li>
+        </ul>
+        <div class="cta-row">
+          <a class="button ghost" href="editing.html">More editing tools</a>
+          <a class="button ghost" href="power.html">Explore power features</a>
+        </div>
+      </section>
+
+      <footer class="site-footer">
+        <span>Markdown that lasts, without making you feel like a markdown nerd.</span>
+        <span>Docs for GitHub Pages · StillPoint</span>
+              <span><a href="philo.html#funding-support">Support the project</a></span>
+      </footer>
+    </main>
+  </body>
+</html>

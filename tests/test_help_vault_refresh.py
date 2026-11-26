@@ -108,3 +108,21 @@ def test_help_vault_populates_windows_linux_shortcuts(main_window, monkeypatch, 
         "> **Windows and Linux:** `Ctrl` is the primary modifier and `Alt` is the alternate modifier.",
         "- `Ctrl+S`",
     ]
+
+
+def test_recording_shortcuts_preserve_physical_control_on_macos(monkeypatch, tmp_path):
+    from sp.app.ui.main_window import MainWindow
+    template = Path(__file__).resolve().parents[1] / "sp" / "help-vault"
+    user_root = tmp_path / "help"
+    target = user_root / "Shortcuts" / "Shortcuts.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# Shortcuts\n", encoding="utf-8")
+    monkeypatch.setattr("sp.app.ui.main_window.platform.system", lambda: "Darwin")
+    MainWindow._populate_platform_shortcuts(user_root, template)
+    content = target.read_text(encoding="utf-8")
+    assert "Control+Option+Shift+R" in content
+    assert "Cmd+Option+Shift+R" not in content
+    assert "Control+Option+Shift+P" in content
+    assert "Control+Option+Shift+S" in content
+    assert "Cmd+Option+Shift+P" not in content
+    assert "Cmd+Option+Shift+S" not in content

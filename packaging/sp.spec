@@ -4,6 +4,7 @@
 #   (Set STILLPOINT_VERSION env var for version stamping if desired.)
 
 import os
+import sys
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 # Resolve project root regardless of where the spec file lives
@@ -68,6 +69,9 @@ hidden = (
     + collect_submodules('docx')
     + collect_submodules('pptx')
 )
+
+if sys.platform.startswith('linux'):
+    hidden += collect_submodules('Xlib') + collect_submodules('dbus_next')
 
 _charset_datas, _charset_binaries, _charset_hidden = collect_all('charset_normalizer')
 hidden += _charset_hidden

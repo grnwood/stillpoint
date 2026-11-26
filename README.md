@@ -20,6 +20,7 @@ StillPoint is a local-first, markdown note system with a PySide6 desktop app and
 <img src="docs/img/calendar-page.png"/>
 
 - Quick Capture (tray/menu/CLI) for low-friction capture into today's page.
+- Voice notes and screen recordings saved as page attachments, with playback, optional audio transcription, tray recording controls, and global screen-recording pause/stop shortcuts.
 - Focus and Audience modes for distraction-free writing and reading.
 - Link graph / navigator and filtered navigation for working in a project context.
 - Print to browser with clean HTML output, print CSS, and image support.
@@ -149,6 +150,34 @@ AI features are opt-in and require configuration. Current capabilities include:
 - Ask questions with context from a single page or a series of pages.
 - RAG over attachments in a folder (PDFs, Word docs, other text).
 - Scrape text from images into the context before querying.
+
+## Voice Notes and Screen Recording
+
+Open a page in a writable local vault and use the microphone or video-record icon beside Print, the matching buttons in Attachments, or **Record Voice Note** / **Record Screen** in the command palette. The destination is shown as a StillPoint colon link and stays bound to the original page while you navigate.
+
+Voice notes offer microphone selection, an input meter, pause/resume, playback review, and M4A (when AAC is available) or WAV output. Open an audio attachment and use **Transcribe** after choosing a transcription server/model in **Preferences → Audio**; this sends the recording to that server.
+
+Screen recording offers a display preview, optional microphone narration (off by default), a large 3–2–1 countdown, and an animated transition to a movable recording bar. System audio is not captured. Stop recording, review the video, then choose **Save attachment**. MP4 is preferred, with encoder fallback when necessary. Failed saves retain drafts for retry.
+
+During screen recording, the tray icon is steady red (recording) or amber (paused). Its menu provides elapsed time, Pause/Resume, Stop and review, and a remembered **Show recording bar** option. Hiding the bar reduces recording artifacts; the OS panel and tray menus can still be captured. Without a usable tray, the bar remains available.
+
+Global screen-recording shortcuts work with other applications focused. Start remains registered while StillPoint is running; pause and stop are registered for an active recording and released when it ends:
+
+| Action | Windows / Linux | macOS |
+| --- | --- | --- |
+| Start on the current page | Ctrl+Alt+Shift+R | Control+Option+Shift+R |
+| Pause/resume | Ctrl+Alt+Shift+P | Control+Option+Shift+P |
+| Stop and review | Ctrl+Alt+Shift+S | Control+Option+Shift+S |
+
+Start uses the most recently focused StillPoint window and its current writable local page, with the last selected screen and microphone. The countdown and OS permissions still apply. Missing saved inputs require an explicit replacement; an active recording or unsaved review is preserved. Wayland still requires its system screen picker.
+
+macOS uses the physical Control key and ANSI R/P/S key positions. Wayland uses the desktop Global Shortcuts portal and may ask you to approve or choose bindings; the tray shows actual granted bindings or registration errors. Conflicts and unsupported desktops leave the bar and tray available.
+
+Newer Wayland desktops also require an installed application identity; the Linux installer supplies `app.stillpoint.StillPoint.desktop` for portal registration.
+
+Screen capture requires Qt Multimedia's FFmpeg backend. Linux Wayland support is experimental in Qt and requires PipeWire and a screen-sharing portal; global shortcuts require a separate Global Shortcuts portal implementation. macOS needs screen-recording permission and microphone permission for narration. Source macOS users should launch through `venv/bin/python tools/run-macos-dev.py`.
+
+Full guide: [built-in help](sp/help-vault/Recording/Recording.md) and [website recording documentation](docs/recording.html).
 
 ## Keyboard Shortcuts
 

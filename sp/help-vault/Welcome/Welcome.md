@@ -54,6 +54,7 @@ You can enable or disable most panels in Preferences.
 - [:Tasks|Tasks] - Track and manage to-dos.
 - [:Calendar|Calendar] - Journal navigation and date browsing.
 - [:Attachments|Attachments] - Add files and media to pages.
+- [:Recording|Voice Notes and Screen Recording] - Capture audio and video, review attachments, and use global recording shortcuts.
 - [:Modes|Modes] - VI, Focus, and Audience modes for different workflows.
 - [:Diagramming|Diagramming] - PlantUML and Mermaid diagramming.
 - [:AI|AI] - Optional AI features and workflows.

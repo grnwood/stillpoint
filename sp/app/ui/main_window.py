@@ -3701,6 +3701,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(print_page_action)
 
         file_menu.addAction(self._record_voice_note_action)
+        file_menu.addAction(self._record_screen_action)
 
         insert_link_action = QAction("Insert Link…", self)
         insert_link_action.setToolTip("Insert a link to another page (Ctrl+L)")
@@ -3756,6 +3757,8 @@ class MainWindow(QMainWindow):
 
         self._register_shortcuts()
         self._setup_quick_capture_shortcut(show_error=False)
+        from .recording_hotkeys import register_recording_start_shortcut
+        register_recording_start_shortcut(self)
         self._focus_recent = ["editor", "tree", "left", "right"]
         self._focus_stylesheet_cache: dict[str, str] = {}
         self._app_focus_changed_slot = None
@@ -4290,6 +4293,14 @@ class MainWindow(QMainWindow):
         if microphone_icon:
             self._record_voice_note_action.setIcon(microphone_icon)
         self.toolbar.addAction(self._record_voice_note_action)
+
+        self._record_screen_action = QAction("Record Screen", self)
+        self._record_screen_action.setToolTip("Record the screen and attach it to the current page")
+        self._record_screen_action.triggered.connect(self._record_screen)
+        video_icon = self._load_icon(self._find_asset("video-record.svg"), icon_color, size=18)
+        if video_icon:
+            self._record_screen_action.setIcon(video_icon)
+        self.toolbar.addAction(self._record_screen_action)
 
         # Add bookmark display area with horizontal scroll controls
         self.bookmark_strip = QWidget()
@@ -7028,6 +7039,8 @@ class MainWindow(QMainWindow):
 
     def _apply_remote_mode_ui(self) -> None:
         """Toggle UI actions based on whether we're connected to a remote server."""
+        if hasattr(self, "_record_screen_action"):
+            self._record_screen_action.setEnabled(not self._remote_mode)
         guarded = [
             (self._action_new_vault, "Create a new vault"),
             (self._action_view_vault_disk, "View vault on disk"),
@@ -12150,6 +12163,7 @@ class MainWindow(QMainWindow):
             ("bookmark_button", "bookmark.svg", 18),
             ("_toolbar_print_action", "print.svg", 18),
             ("_record_voice_note_action", "microphone.svg", 18),
+            ("_record_screen_action", "video-record.svg", 18),
             ("_attachment_indicator", "attachment-paperclip.svg", 18),
             ("_toolbar_prefs_action", "cog.svg", 18),
         ):
@@ -22574,6 +22588,25 @@ class MainWindow(QMainWindow):
                 self.tags_tab.focus_search()
         except Exception:
             pass
+
+    def _start_screen_recording_from_hotkey(self) -> None:
+        if (self._remote_mode or not self.current_path
+                or not self._ensure_writable("record the screen", interactive=False)):
+            self._show_from_tray()
+            self.statusBar().showMessage("Open a writable local page to start a screen recording", 5000)
+            return
+        self._focus_attachments_tab()
+        self.right_panel.attachments_panel._record_screen(auto_start=True)
+
+    def _record_screen(self) -> None:
+        if self._remote_mode:
+            self.statusBar().showMessage("Screen recording requires a local vault", 3000)
+            return
+        if not self.current_path:
+            self.statusBar().showMessage("Open a page to record the screen", 3000)
+            return
+        self._focus_attachments_tab()
+        self.right_panel.attachments_panel._record_screen()
 
     def _record_voice_note(self) -> None:
         """Reveal the destination attachments and open its voice recorder."""

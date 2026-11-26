@@ -70,4 +70,5 @@ Templates help you create consistent pages quickly.
 ## Next Steps
 - Learn about [:Editor|Editor] and [:Navigation|Navigation].
 - Try adding [:Tasks|Tasks] and [:Calendar|Calendar].
+- Capture a spoken thought or a screen walkthrough with [:Recording|Voice Notes and Screen Recording].
 - Visit [:Welcome|Welcome] for the bigger-picture view of how people use StillPoint day to day.

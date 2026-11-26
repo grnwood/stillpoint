@@ -12,6 +12,10 @@ Attachments keep files in context with the page you are working on.
 - Double-click an attachment to open it.
 - Use the folder button to open the page folder in your file manager.
 
+## Voice Notes and Screen Recording
+
+The microphone and video-record buttons in this panel create new recordings for the current page. The same controls appear beside Print in the main toolbar and as **Record Voice Note** / **Record Screen** in the command palette. Double-click saved audio or video for playback inside StillPoint. See [:Recording|Voice Notes and Screen Recording] for microphone setup, transcription, countdowns, tray controls, and global pause/stop shortcuts.
+
 ## Images
 - Pasted images are saved as attachments for the current page.
 - Images can be embedded inline directly in your note.

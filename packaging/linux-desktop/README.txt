@@ -71,6 +71,7 @@ To uninstall:
   sudo rm -rf /opt/stillpoint
   sudo rm /usr/local/bin/stillpoint
   sudo rm /usr/share/applications/stillpoint.desktop
+  sudo rm /usr/share/applications/app.stillpoint.StillPoint.desktop
   sudo rm /usr/share/icons/stillpoint.png
 
 TROUBLESHOOTING

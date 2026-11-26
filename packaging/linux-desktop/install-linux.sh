@@ -22,6 +22,7 @@ CAPTURE_LINK="/usr/local/bin/stillpoint-capture"
 ICON_TARGET="/usr/share/icons/stillpoint.png"
 FOLDER_NAV_ICON_TARGET="/usr/share/icons/stillpoint-folder-navigator.png"
 DESKTOP_FILE="/usr/share/applications/stillpoint.desktop"
+PORTAL_DESKTOP_FILE="/usr/share/applications/app.stillpoint.StillPoint.desktop"
 FOLDER_NAV_DESKTOP_FILE="/usr/share/applications/stillpoint-folder-navigator.desktop"
 
 echo "📦 Installing $APP_NAME..."
@@ -121,6 +122,12 @@ StartupWMClass=stillpoint
 EOF
 
 chmod 644 "$DESKTOP_FILE"
+
+# Reverse-DNS identity for the Wayland Global Shortcuts portal. Keep the
+# existing launcher name, and hide this identity alias from application menus.
+cp "$DESKTOP_FILE" "$PORTAL_DESKTOP_FILE"
+printf '\nNoDisplay=true\n' >> "$PORTAL_DESKTOP_FILE"
+chmod 644 "$PORTAL_DESKTOP_FILE"
 
 echo "➡️  Creating Folder Navigator desktop entry at $FOLDER_NAV_DESKTOP_FILE"
 

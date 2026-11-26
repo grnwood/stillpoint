@@ -55,9 +55,10 @@ class _AudioDownload(QRunnable):
 
 
 class AudioPlayerDialog(AudioWindow):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, video=False):
         super().__init__(parent)
-        self.setWindowTitle("Audio player")
+        self._video = video
+        self.setWindowTitle("Video player" if video else "Audio player")
         self.setAttribute(Qt.WA_DeleteOnClose)
         self.resize(380, 180)
         self._download = None
@@ -86,6 +87,13 @@ class AudioPlayerDialog(AudioWindow):
         self.title.setWordWrap(True)
         layout.addWidget(self.title)
         self.add_drag_handle(self.title)
+        if video:
+            from PySide6.QtMultimediaWidgets import QVideoWidget
+            self.video_widget = QVideoWidget()
+            self.video_widget.setMinimumSize(480, 270)
+            self.player.setVideoOutput(self.video_widget)
+            layout.addWidget(self.video_widget)
+            self.resize(640, 440)
         self.seek = QSlider(Qt.Horizontal)
         self.seek.setRange(0, 0)
         self.seek.setEnabled(False)
@@ -141,6 +149,7 @@ class AudioPlayerDialog(AudioWindow):
         self.transcribe_button.setIcon(QIcon(str(Path(__file__).resolve().parents[2] / "assets" / "transcribe.svg")))
         self.transcribe_button.setAutoDefault(False)
         self.transcribe_button.setToolTip("Send this recording to the transcription server selected in Preferences → Audio")
+        self.transcribe_button.setVisible(not video)
         self.transcribe_button.clicked.connect(self._transcribe)
         transcription_actions.addWidget(self.transcribe_button)
         transcription_actions.addStretch()
@@ -186,7 +195,7 @@ class AudioPlayerDialog(AudioWindow):
 
     def _set_title(self, name):
         self.title.setText(name)
-        self.setWindowTitle(f"Audio · {name}")
+        self.setWindowTitle(f"{'Video' if self._video else 'Audio'} · {name}")
 
     def _load(self, path):
         self._audio_path = Path(path)

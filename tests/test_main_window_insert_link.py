@@ -134,3 +134,35 @@ def test_insert_external_link_over_selection_survives_reload(qapp, monkeypatch):
     qapp.processEvents()
     assert win.editor.to_markdown() == expected
     win.close()
+
+
+def test_screen_recording_action_is_beside_voice_note_and_in_palette(qapp, monkeypatch):
+    win = _build_main_window(qapp, monkeypatch)
+    actions = win.toolbar.actions()
+    voice_index = actions.index(win._record_voice_note_action)
+    assert actions[voice_index + 1] is win._record_screen_action
+    assert not win._record_screen_action.icon().isNull()
+    assert any(action is win._record_screen_action for _, action in win._collect_menu_actions())
+    calls = []
+    monkeypatch.setattr(win, "_focus_attachments_tab", lambda: calls.append("attachments"))
+    monkeypatch.setattr(win.right_panel.attachments_panel, "_record_screen", lambda: calls.append("record"))
+    win._record_screen_action.trigger()
+    assert calls == ["attachments", "record"]
+    win.close()
+
+
+def test_global_recording_start_uses_current_page_and_checks_writability(qapp, monkeypatch):
+    win = _build_main_window(qapp, monkeypatch)
+    calls = []
+    monkeypatch.setattr(win, "_focus_attachments_tab", lambda: calls.append("attachments"))
+    monkeypatch.setattr(win, "_ensure_writable", lambda *args, **kwargs: True)
+    monkeypatch.setattr(win.right_panel.attachments_panel, "_record_screen",
+                        lambda *, auto_start=False: calls.append(auto_start))
+    win._start_screen_recording_from_hotkey()
+    assert calls == ["attachments", True]
+    monkeypatch.setattr(win, "_show_from_tray", lambda: calls.append("show"))
+    monkeypatch.setattr(win, "_ensure_writable", lambda *args, **kwargs: False)
+    win._start_screen_recording_from_hotkey()
+    assert calls == ["attachments", True, "show"]
+    assert "writable local page" in win.statusBar().currentMessage()
+    win.close()

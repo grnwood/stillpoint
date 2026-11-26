@@ -15,6 +15,14 @@ These shortcuts will speed up your workflow:
 - `Ctrl+Alt+V`: Open the quick vault picker (`\` inside it collapses the whole popup tree back to the top)
 - `Ctrl+Shift+S`: Save all open pages
 
+### Screen Recording (Global)
+- `Control+Alt+Shift+R`: Start a screen recording for the current page in the most recently focused StillPoint window, using the last selected screen and microphone.
+- `Control+Alt+Shift+P`: Pause or resume screen recording, even when another application has focus.
+- `Control+Alt+Shift+S`: Stop screen recording and open review.
+- On macOS these use the physical **Control** key, not Command; R, P, and S refer to ANSI key positions.
+- Start stays registered while StillPoint is running; pause/stop are active for a recording. Wayland still requires the system screen picker and may prompt for approval or different bindings; the tray menu shows granted bindings. Conflicts or unsupported desktops are reported; use the tray or recording bar instead.
+- Start with **Record Screen** or **Record Voice Note** in the command palette. See [:Recording] for the full guide.
+
 ### Editing
 - `Ctrl+Z`: Undo
 - `Ctrl+Y`: Redo

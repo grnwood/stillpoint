@@ -164,3 +164,9 @@ Available three-state overrides:
 - **AI Chats**: Overrides whether AI chat is enabled in this vault.
 
 Use **Use Global Defaults** to reset the accent color and three-state overrides back to global behavior. It does not change the vault's versioning/sync mode.
+
+## Audio
+
+Choose the default microphone, recording format, and playback volume. For optional transcription, choose a transcription server, speech-to-text model, and endpoint. Transcription sends the selected audio recording to that server. See [:Recording|Voice Notes and Screen Recording] for recording and playback instructions.
+
+Screen-recording bar visibility and its dragged position are remembered from the recorder and tray controls. The last screen and microphone choices are also remembered. The global Start shortcut stays registered while StillPoint is running; pause/stop shortcuts are registered during recording. They are separate from the in-app Quick Capture hotkey.

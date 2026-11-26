@@ -1022,6 +1022,8 @@ def main() -> None:
     # for the action carrying QAction.AboutRole.
     qt_app.setApplicationName("StillPoint")
     qt_app.setApplicationDisplayName("StillPoint")
+    if sys.platform.startswith("linux"):
+        qt_app.setDesktopFileName("app.stillpoint.StillPoint")
     eventloop_diag.install_ui_method_probe()
     eventloop_diag.log_fd_target("after QApplication creation")
     eventloop_diag.install_qt_event_sampler(qt_app)

@@ -151,3 +151,9 @@ Include:
 - whether `Tools -> Rebuild Vault Index` or `Rebuild Vault Search Index` changed behavior
 
 [https://github.com/grnwood/stillpoint/issues|]
+
+## Recording and Global Shortcuts
+
+See [:Recording] for permissions and platform requirements. If a global recording shortcut is already reserved or the Wayland Global Shortcuts portal is unavailable, use the recording bar or system tray menu. A tray icon does not imply that global shortcuts were successfully registered; its recording menu reports shortcut status.
+
+For screen capture on Wayland, check PipeWire and the desktop screen-sharing portal. For microphone access on macOS, grant permission to the StillPoint app bundle. If an encoder or attachment save fails, read the recorder message and retain the displayed draft path before closing or discarding.
