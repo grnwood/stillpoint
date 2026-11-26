@@ -6,7 +6,8 @@ import shutil
 import tempfile
 import threading
 
-from PySide6.QtCore import QCoreApplication, QIODevice, QObject, QRunnable, QSaveFile, QThreadPool, QUrl, Qt, Signal
+from PySide6.QtCore import QCoreApplication, QIODevice, QObject, QRunnable, QSaveFile, QThreadPool, QUrl, QSize, Qt, Signal
+from PySide6.QtGui import QIcon
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import QApplication, QFileDialog, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QSlider, QVBoxLayout, QWidget
 
@@ -94,11 +95,21 @@ class AudioPlayerDialog(AudioWindow):
         self.time_label = QLabel("00:00 / 00:00")
         layout.addWidget(self.time_label)
         controls = QHBoxLayout()
-        self.play_button = QPushButton("Play")
+        self.play_button = QPushButton()
+        self.play_button.setIconSize(QSize(32, 32))
+        self.play_button.setFixedSize(52, 52)
+        self.play_button.setToolTip("Play")
+        self.play_button.setAccessibleName("Play")
+        self.play_button.setIcon(QIcon(str(Path(__file__).resolve().parents[2] / "assets" / "play.svg")))
         self.play_button.setAutoDefault(False)
         self.play_button.clicked.connect(self._toggle_playback)
         controls.addWidget(self.play_button)
-        self.stop_button = QPushButton("Stop")
+        self.stop_button = QPushButton()
+        self.stop_button.setIconSize(QSize(32, 32))
+        self.stop_button.setFixedSize(52, 52)
+        self.stop_button.setToolTip("Stop")
+        self.stop_button.setAccessibleName("Stop")
+        self.stop_button.setIcon(QIcon(str(Path(__file__).resolve().parents[2] / "assets" / "stop.svg")))
         self.stop_button.setAutoDefault(False)
         self.stop_button.clicked.connect(self.player.stop)
         controls.addWidget(self.stop_button)
@@ -122,7 +133,12 @@ class AudioPlayerDialog(AudioWindow):
         self.retry_button.hide()
         layout.addWidget(self.retry_button)
         transcription_actions = QHBoxLayout()
-        self.transcribe_button = QPushButton("Transcribe")
+        self.transcribe_button = QPushButton()
+        self.transcribe_button.setIconSize(QSize(32, 32))
+        self.transcribe_button.setFixedSize(52, 52)
+        self.transcribe_button.setToolTip("Transcribe")
+        self.transcribe_button.setAccessibleName("Transcribe")
+        self.transcribe_button.setIcon(QIcon(str(Path(__file__).resolve().parents[2] / "assets" / "transcribe.svg")))
         self.transcribe_button.setAutoDefault(False)
         self.transcribe_button.setToolTip("Send this recording to the transcription server selected in Preferences → Audio")
         self.transcribe_button.clicked.connect(self._transcribe)
@@ -244,7 +260,8 @@ class AudioPlayerDialog(AudioWindow):
         self._transcription = worker
         worker.signals.finished.connect(self._transcription_finished)
         self.transcribe_button.setEnabled(False)
-        self.transcribe_button.setText("Transcribing…")
+        self.transcribe_button.setToolTip("Transcribing…")
+        self.transcribe_button.setAccessibleName("Transcribing…")
         self.message.setText(f"Transcribing with {server['name']} · {model}…")
         self.message.show()
         worker.start()
@@ -253,7 +270,8 @@ class AudioPlayerDialog(AudioWindow):
         if worker is not self._transcription:
             return
         self._transcription = None
-        self.transcribe_button.setText("Transcribe")
+        self.transcribe_button.setToolTip("Transcribe")
+        self.transcribe_button.setAccessibleName("Transcribe")
         self.transcribe_button.setEnabled(self._audio_path is not None)
         if error:
             self.message.setText(f"Transcription failed: {error}")
@@ -296,7 +314,10 @@ class AudioPlayerDialog(AudioWindow):
         self.time_label.setText(f"{audio_time(position)} / {audio_time(self.player.duration())}")
 
     def _playback_changed(self, state):
-        self.play_button.setText("Pause" if state == QMediaPlayer.PlayingState else "Play")
+        self.play_button.setToolTip("Pause" if state == QMediaPlayer.PlayingState else "Play")
+        self.play_button.setAccessibleName("Pause" if state == QMediaPlayer.PlayingState else "Play")
+        self.play_button.setIcon(QIcon(str(Path(__file__).resolve().parents[2] / "assets" /
+                                          ("pause.svg" if state == QMediaPlayer.PlayingState else "play.svg"))))
 
     def _toggle_playback(self):
         if self.player.playbackState() == QMediaPlayer.PlayingState:
@@ -317,7 +338,8 @@ class AudioPlayerDialog(AudioWindow):
             self._transcription.cancelled.set()
             self._transcription = None
         self._audio_path = None
-        self.transcribe_button.setText("Transcribe")
+        self.transcribe_button.setToolTip("Transcribe")
+        self.transcribe_button.setAccessibleName("Transcribe")
         self.transcript.clear()
         self.transcript_panel.hide()
         if self._download is not None:

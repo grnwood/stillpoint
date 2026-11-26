@@ -8,7 +8,7 @@ import sys
 import tempfile
 import uuid
 
-from PySide6.QtCore import QCoreApplication, QEvent, QMicrophonePermission, QSignalBlocker, QThread, QTimer, QUrl, Qt, Signal
+from PySide6.QtCore import QCoreApplication, QEvent, QMicrophonePermission, QSignalBlocker, QThread, QTimer, QUrl, QSize, Qt, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaDevices, QMediaPlayer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
@@ -94,6 +94,7 @@ class VoiceNoteDialog(AudioWindow):
         for handle in (self.heading, icon, title):
             self.add_drag_handle(handle)
         self.destination = QLabel(f"Attach to: {page_name}")
+        self.destination.setTextFormat(Qt.PlainText)
         self.destination.setWordWrap(True)
         layout.addWidget(self.destination)
         self.microphone = QComboBox()
@@ -115,14 +116,33 @@ class VoiceNoteDialog(AudioWindow):
         self.status = QLabel("Ready to record")
         layout.addWidget(self.status)
         controls = QHBoxLayout()
-        self.record_button = QPushButton("Record")
+        self.record_button = QPushButton()
+        self.record_button.setIconSize(QSize(32, 32))
+        self.record_button.setFixedSize(52, 52)
+        self.record_button.setToolTip("Record")
+        self.record_button.setAccessibleName("Record")
         self.record_button.clicked.connect(self._record)
-        self.pause_button = QPushButton("Pause")
+        self.pause_button = QPushButton()
+        self.pause_button.setIconSize(QSize(32, 32))
+        self.pause_button.setFixedSize(52, 52)
+        self.pause_button.setToolTip("Pause")
+        self.pause_button.setAccessibleName("Pause")
         self.pause_button.clicked.connect(self._pause_resume)
-        self.stop_button = QPushButton("Stop")
+        self.stop_button = QPushButton()
+        self.stop_button.setIconSize(QSize(32, 32))
+        self.stop_button.setFixedSize(52, 52)
+        self.stop_button.setToolTip("Stop")
+        self.stop_button.setAccessibleName("Stop")
         self.stop_button.clicked.connect(self._stop)
-        self.play_button = QPushButton("Play")
+        self.play_button = QPushButton()
+        self.play_button.setIconSize(QSize(32, 32))
+        self.play_button.setFixedSize(52, 52)
+        self.play_button.setToolTip("Play")
+        self.play_button.setAccessibleName("Play")
         self.play_button.clicked.connect(self._play)
+        for button, name in ((self.record_button, "record"), (self.pause_button, "pause"),
+                             (self.stop_button, "stop"), (self.play_button, "play")):
+            button.setIcon(QIcon(str(Path(__file__).resolve().parents[2] / "assets" / f"{name}.svg")))
         for button in (self.record_button, self.pause_button, self.stop_button, self.play_button):
             button.setAutoDefault(False)
             controls.addWidget(button)
@@ -299,10 +319,16 @@ class VoiceNoteDialog(AudioWindow):
         self.record_button.setEnabled(state == "idle" and self.microphone.count() > 0
                                       and not self._permission_pending and not self._busy)
         self.pause_button.setEnabled(state in ("recording", "paused") and not self._busy)
-        self.pause_button.setText("Resume" if state == "paused" else "Pause")
+        self.pause_button.setToolTip("Resume" if state == "paused" else "Pause")
+        self.pause_button.setAccessibleName("Resume" if state == "paused" else "Pause")
+        self.pause_button.setIcon(QIcon(str(Path(__file__).resolve().parents[2] / "assets" /
+                                          ("play.svg" if state == "paused" else "pause.svg"))))
         self.stop_button.setEnabled(state in ("recording", "paused") and not self._busy)
         self.play_button.setEnabled(ready and not self._busy)
-        self.play_button.setText("Stop playback" if self.player.playbackState() == QMediaPlayer.PlayingState else "Play")
+        self.play_button.setToolTip("Stop playback" if self.player.playbackState() == QMediaPlayer.PlayingState else "Play")
+        self.play_button.setAccessibleName("Stop playback" if self.player.playbackState() == QMediaPlayer.PlayingState else "Play")
+        self.play_button.setIcon(QIcon(str(Path(__file__).resolve().parents[2] / "assets" /
+                                          ("stop.svg" if self.player.playbackState() == QMediaPlayer.PlayingState else "play.svg"))))
         self.save_button.setEnabled(ready and not self._busy)
         self.file_format.setEnabled(not self._busy)
         self.discard_button.setEnabled(not self._busy and not self._permission_pending)

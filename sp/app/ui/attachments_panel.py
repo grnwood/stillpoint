@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 import httpx
 
 from PySide6.QtCore import Qt, QUrl, QSize, QMimeData, Signal, QEvent, QSignalBlocker, QTimer, QSettings
-from PySide6.QtGui import QIcon, QDesktopServices, QDrag, QPainter, QPixmap, QPalette
+from PySide6.QtGui import QIcon, QDesktopServices, QDrag, QPainter, QPixmap, QPalette, QColor
 from PySide6.QtWidgets import (
     QApplication,
     QStyle,
@@ -265,7 +265,7 @@ class AttachmentsPanel(QWidget):
         toolbar.addWidget(self.add_button)
 
         self.record_button = QToolButton()
-        self.record_button.setIcon(QIcon(str(Path(__file__).resolve().parents[2] / "assets" / "microphone.svg")))
+        self._set_toolbar_icon(self.record_button, "microphone.svg", QColor("#e53935"))
         self.record_button.setText("Record")
         self.record_button.setToolTip("Record a voice note")
         self.record_button.setAccessibleName("Record a voice note")
@@ -751,7 +751,7 @@ class AttachmentsPanel(QWidget):
             "Hide hidden files" if self._show_hidden_files else "Show hidden files"
         )
 
-    def _set_toolbar_icon(self, button, asset):
+    def _set_toolbar_icon(self, button, asset, color=None):
         path = Path(__file__).resolve().parents[2] / "assets" / asset
         pixmap = QIcon(str(path)).pixmap(button.iconSize())
         if not pixmap.isNull():
@@ -761,7 +761,7 @@ class AttachmentsPanel(QWidget):
             painter = QPainter(tinted)
             painter.drawPixmap(0, 0, pixmap)
             painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
-            painter.fillRect(tinted.rect(), self.palette().color(QPalette.ButtonText))
+            painter.fillRect(tinted.rect(), color if color is not None else self.palette().color(QPalette.ButtonText))
             painter.end()
             button.setIcon(QIcon(tinted))
 
@@ -770,6 +770,7 @@ class AttachmentsPanel(QWidget):
         if event.type() == QEvent.PaletteChange and hasattr(self, "hidden_files_button"):
             self._update_hidden_files_icon()
             self._update_thumbnails_icon()
+            self._set_toolbar_icon(self.record_button, "microphone.svg", QColor("#e53935"))
 
     def _get_remote_cache_root(self) -> Optional[Path]:
         if not self._api_base:
@@ -861,7 +862,10 @@ class AttachmentsPanel(QWidget):
                     raise
                 return name
 
-        dialog = VoiceNoteDialog(self, page_key or str(page), save_attachment,
+        from .path_utils import path_to_colon
+
+        page_link = path_to_colon(page_key or page.name)
+        dialog = VoiceNoteDialog(self, page_link, save_attachment,
                                  auth_prompt=self._auth_prompt if remote else None)
         self._voice_dialog = dialog
 

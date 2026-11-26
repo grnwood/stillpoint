@@ -3700,6 +3700,8 @@ class MainWindow(QMainWindow):
         print_page_action.triggered.connect(self._print_current_page)
         file_menu.addAction(print_page_action)
 
+        file_menu.addAction(self._record_voice_note_action)
+
         insert_link_action = QAction("Insert Link…", self)
         insert_link_action.setToolTip("Insert a link to another page (Ctrl+L)")
         insert_link_action.triggered.connect(self._insert_link)
@@ -4280,6 +4282,14 @@ class MainWindow(QMainWindow):
         print_action.triggered.connect(self._print_current_page)
         self.toolbar.addAction(print_action)
         self._toolbar_print_action = print_action
+
+        self._record_voice_note_action = QAction("Record Voice Note", self)
+        self._record_voice_note_action.setToolTip("Record a voice note attached to the current page")
+        self._record_voice_note_action.triggered.connect(self._record_voice_note)
+        microphone_icon = self._load_icon(self._find_asset("microphone.svg"), icon_color, size=18)
+        if microphone_icon:
+            self._record_voice_note_action.setIcon(microphone_icon)
+        self.toolbar.addAction(self._record_voice_note_action)
 
         # Add bookmark display area with horizontal scroll controls
         self.bookmark_strip = QWidget()
@@ -12139,6 +12149,7 @@ class MainWindow(QMainWindow):
             ("_toolbar_today_action", "calendar-days.svg", 18),
             ("bookmark_button", "bookmark.svg", 18),
             ("_toolbar_print_action", "print.svg", 18),
+            ("_record_voice_note_action", "microphone.svg", 18),
             ("_attachment_indicator", "attachment-paperclip.svg", 18),
             ("_toolbar_prefs_action", "cog.svg", 18),
         ):
@@ -22563,6 +22574,14 @@ class MainWindow(QMainWindow):
                 self.tags_tab.focus_search()
         except Exception:
             pass
+
+    def _record_voice_note(self) -> None:
+        """Reveal the destination attachments and open its voice recorder."""
+        if not self.current_path:
+            self.statusBar().showMessage("Open a page to record a voice note", 3000)
+            return
+        self._focus_attachments_tab()
+        self.right_panel.attachments_panel._record_voice_note()
 
     def _focus_attachments_tab(self) -> None:
         """Switch to Attachments tab and focus."""

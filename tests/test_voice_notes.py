@@ -464,3 +464,21 @@ def test_qt_encodes_complete_playable_m4a_without_microphone(qapp, tmp_path):
     # AAC can include a small amount of encoder padding, but no lost chunks.
     assert 950000 <= sum(decoded) <= 1100000
     decoder.stop()
+
+
+def test_recording_destination_uses_vault_colon_link(qtbot, tmp_path):
+    folder = tmp_path / "Projects" / "Meeting"
+    folder.mkdir(parents=True)
+    page = folder / "Meeting.md"
+    page.write_text("# Meeting")
+    panel = AttachmentsPanel()
+    qtbot.addWidget(panel)
+    panel.set_vault_root(str(tmp_path))
+    panel.set_page(page)
+    panel.record_button.click()
+    dialog = panel._voice_dialog
+    assert dialog.destination.text() == "Attach to: Projects:Meeting"
+    assert all(not button.icon().isNull() for button in (
+        dialog.record_button, dialog.pause_button, dialog.stop_button, dialog.play_button,
+    ))
+    dialog.reject()
