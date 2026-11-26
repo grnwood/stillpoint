@@ -156,6 +156,8 @@ class ScreenCaptureOverlay(QWidget):
         self._text_size = 18
         self._highlight_width = 18
         self._pixelate_width = 36
+        self._brush_position = None
+        self.setMouseTracking(True)
         self._text_index = None
         self._text_before = None
         self._text_start = None
@@ -191,6 +193,12 @@ class ScreenCaptureOverlay(QWidget):
             button.clicked.connect(callback)
             row.addWidget(button, column // 8, column % 8)
             column += 1
+        self.brush_size_label = QLabel(self.toolbar)
+        self.brush_size_label.setAlignment(Qt.AlignCenter)
+        self.brush_size_label.setMinimumWidth(68)
+        self.brush_size_label.setAccessibleName("Brush size")
+        row.addWidget(self.brush_size_label, column // 8, column % 8)
+        self.brush_size_label.hide()
         self.toolbar.hide()
         self.text_frame = QWidget(self)
         self.text_frame.setStyleSheet("background: transparent; border: 1px dashed #00bfff;")
@@ -257,7 +265,22 @@ class ScreenCaptureOverlay(QWidget):
         self.tool = tool
         self.setCursor(Qt.ArrowCursor if tool == "Select" else Qt.CrossCursor)
         self.tool_buttons[tool].setChecked(True)
+        self._update_brush_indicator()
         self.update()
+
+    def _update_brush_indicator(self):
+        width = self._highlight_width if self.tool == "Highlight" else self._pixelate_width
+        self.brush_size_label.setText(f"{width} px")
+        self.brush_size_label.setToolTip("Ctrl/Cmd+scroll to change brush size")
+        self.brush_size_label.setVisible(self.tool in ("Highlight", "Pixelate"))
+        self.toolbar.adjustSize()
+
+    def _brush_bounds(self):
+        if (self.tool not in ("Highlight", "Pixelate") or not self._selected
+                or self._brush_position is None or not self.selection.contains(self._brush_position.toPoint())):
+            return QRectF()
+        width = self._highlight_width if self.tool == "Highlight" else self._pixelate_width
+        return QRectF(self._brush_position.x() - width / 2, self._brush_position.y() - width / 2, width, width)
 
     def _begin_text(self, point, index=None):
         self._finish_text()
@@ -359,6 +382,7 @@ class ScreenCaptureOverlay(QWidget):
             self._highlight_width = max(4, min(144, self._highlight_width + (2 if delta > 0 else -2)))
             self.tool_buttons["Highlight"].setToolTip(
                 f"Highlight (H) · {self._highlight_width} px · Ctrl/Cmd+scroll to change thickness")
+            self._update_brush_indicator()
             self.update()
         event.accept()
 
@@ -375,6 +399,7 @@ class ScreenCaptureOverlay(QWidget):
             self._pixelate_width = max(12, min(144, self._pixelate_width + (4 if delta > 0 else -4)))
             self.tool_buttons["Pixelate"].setToolTip(
                 f"Pixelate (P) · {self._pixelate_width} px · Ctrl/Cmd+scroll to change size")
+            self._update_brush_indicator()
             self.update()
         event.accept()
 
@@ -579,6 +604,23 @@ class ScreenCaptureOverlay(QWidget):
             painter.restore()
             painter.setPen(QPen(Qt.white, 1, Qt.DashLine))
             painter.drawRect(self.selection.adjusted(0, 0, -1, -1))
+        bounds = self._brush_bounds()
+        if not bounds.isEmpty():
+            painter.save()
+            painter.setClipRect(self.selection)
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setBrush(Qt.NoBrush)
+            # Two contrasting outlines remain visible over light and dark images.
+            painter.setPen(QPen(Qt.black, 3))
+            painter.drawEllipse(bounds)
+            painter.setPen(QPen(Qt.white, 1))
+            painter.drawEllipse(bounds)
+            painter.restore()
+
+    def leaveEvent(self, event):
+        self._brush_position = None
+        self.update()
+        super().leaveEvent(event)
 
     def mousePressEvent(self, event):
         if event.button() != Qt.LeftButton:
@@ -615,6 +657,9 @@ class ScreenCaptureOverlay(QWidget):
             self.update()
 
     def mouseMoveEvent(self, event):
+        self._brush_position = event.position()
+        if self.tool in ("Highlight", "Pixelate"):
+            self.update()
         if self._anchor is None:
             return
         if self._selected and self.tool == "Select":

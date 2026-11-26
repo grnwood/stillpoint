@@ -194,6 +194,33 @@ def test_palette_icon_is_white(qtbot):
     widget.close()
 
 
+@pytest.mark.parametrize("tool, initial, resized", [("Highlight", 18, 20), ("Pixelate", 36, 40)])
+def test_brush_size_indicator_tracks_pointer_and_scroll_without_exporting(qtbot, tool, initial, resized):
+    from PySide6.QtGui import QMouseEvent, QWheelEvent
+    from PySide6.QtCore import QEvent
+    widget = overlay(qtbot)
+    widget.show()
+    widget._set_tool(tool)
+    QApplication.sendEvent(widget, QMouseEvent(QEvent.MouseMove, QPointF(100, 90), QPointF(100, 90),
+        Qt.NoButton, Qt.NoButton, Qt.NoModifier))
+    assert widget._brush_bounds().center() == QPointF(100, 90)
+    assert widget._brush_bounds().width() == initial
+    assert widget.brush_size_label.isVisible()
+    assert widget.brush_size_label.text() == f"{initial} px"
+    before = widget.rendered_image()
+    event = QWheelEvent(QPointF(100, 90), QPointF(100, 90), QPoint(), QPoint(0, 120),
+                        Qt.NoButton, Qt.ControlModifier, Qt.NoScrollPhase, False)
+    widget.wheelEvent(event)
+    assert widget._brush_bounds().width() == resized
+    assert widget.brush_size_label.text() == f"{resized} px"
+    assert widget.rendered_image() == before
+    widget.leaveEvent(QEvent(QEvent.Leave))
+    assert widget._brush_bounds().isEmpty()
+    widget._set_tool("Select")
+    assert widget.brush_size_label.isHidden()
+    widget.close()
+
+
 @pytest.mark.parametrize("scale", [1, 2])
 def test_pixelate_swipe_removes_fine_detail_and_preserves_outside(qtbot, scale):
     from PySide6.QtGui import QPainter, QWheelEvent
