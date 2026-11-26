@@ -591,14 +591,14 @@ class ScreenRecordDialog(AudioWindow):
         size = size or self.size()
         screens = QGuiApplication.screens()
         saved = self._bar_settings.value("screenRecording/toolbarPosition")
-        screen = QGuiApplication.screenAt(saved) if isinstance(saved, QPoint) else None
-        if screen is None:
-            selected = self.screen.currentData()
-            screen = selected if selected in screens else QGuiApplication.primaryScreen()
-            available = screen.availableGeometry()
+        selected = self.screen.currentData()
+        screen = selected if selected in screens else QGuiApplication.primaryScreen()
+        available = screen.availableGeometry()
+        # A remembered drag position must not override the recording display.
+        # Reuse it only when it belongs to the currently selected screen.
+        if not isinstance(saved, QPoint) or not screen.geometry().contains(saved):
             return QPoint(available.center().x() - size.width() // 2,
                           available.bottom() - size.height() - 12 + 1)
-        available = screen.availableGeometry()
         return QPoint(max(available.left(), min(saved.x(), available.right() - size.width() + 1)),
                       max(available.top(), min(saved.y(), available.bottom() - size.height() + 1)))
 

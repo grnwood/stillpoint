@@ -116,6 +116,10 @@ class ImageView(QGraphicsView):
         if event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier):
             if self.editor.canvas._text_start is not None:
                 self.editor.canvas._resize_text_from_wheel(event)
+            elif self.editor.canvas.tool == "Highlight":
+                self.editor.canvas._resize_highlight_from_wheel(event)
+            elif self.editor.canvas.tool == "Pixelate":
+                self.editor.canvas._resize_pixelate_from_wheel(event)
             else:
                 delta = event.angleDelta().y() or event.pixelDelta().y()
                 if delta:
@@ -198,7 +202,8 @@ class ImageEditorWindow(QMainWindow):
         self.setCentralWidget(body)
         for title, sequence, callback in (("Save", QKeySequence.Save, self.save_changes),
                                            ("Save As", QKeySequence.SaveAs, self.save_as),
-                                           ("Copy image", QKeySequence.Copy, self.canvas.copy_image)):
+                                           ("Copy", QKeySequence.Copy, self.canvas.copy_selection_or_image),
+                                           ("Paste item", QKeySequence.Paste, self.canvas.paste_annotation)):
             action = QAction(title, self)
             action.setShortcut(sequence)
             self.addAction(action)

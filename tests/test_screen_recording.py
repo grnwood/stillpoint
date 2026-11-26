@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import time
 
 import pytest
-from PySide6.QtCore import QAbstractAnimation, QPoint, QSettings, QUrl, Qt
+from PySide6.QtCore import QAbstractAnimation, QPoint, QRect, QSettings, QSize, QUrl, Qt
 from PySide6.QtMultimedia import QMediaRecorder
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QMessageBox
@@ -299,6 +299,23 @@ def test_recording_bar_returns_to_visible_screen_after_monitor_removed(qtbot):
     assert available.contains(dialog.geometry())
     dialog._compact(False)
     dialog.reject()
+
+
+@pytest.mark.parametrize("saved, expected", [
+    (QPoint(200, 500), QPoint(-682, 732)),  # Saved on the other screen.
+    (QPoint(-900, 500), QPoint(-900, 500)),  # Saved on the selected screen.
+    (QPoint(-10, 790), QPoint(-164, 744)),  # Keep the whole bar visible.
+])
+def test_recording_bar_position_follows_selected_display(monkeypatch, saved, expected):
+    from sp.app.ui import screen_record_dialog as module
+    selected = SimpleNamespace(geometry=lambda: QRect(-1200, 0, 1200, 800),
+                               availableGeometry=lambda: QRect(-1200, 0, 1200, 780))
+    other = SimpleNamespace(geometry=lambda: QRect(0, 0, 1200, 800))
+    monkeypatch.setattr(module.QGuiApplication, "screens", lambda: [other, selected])
+    monkeypatch.setattr(module.QGuiApplication, "primaryScreen", lambda: other)
+    dialog = SimpleNamespace(screen=SimpleNamespace(currentData=lambda: selected),
+        _bar_settings=SimpleNamespace(value=lambda key: saved))
+    assert ScreenRecordDialog._bar_position(dialog, QSize(164, 36)) == expected
 
 
 def test_countdown_shows_large_numbers_and_cancel_restores_preview(qtbot, monkeypatch):

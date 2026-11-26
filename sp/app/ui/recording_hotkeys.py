@@ -17,6 +17,9 @@ BINDINGS = (("pause", "P", "Pause/resume screen recording"),
             ("stop", "S", "Stop screen recording and review"))
 PORTAL_APP_ID = "app.stillpoint.StillPoint"
 DEFAULT_DESCRIPTION = "Ctrl+Alt+Shift+P: pause/resume · Ctrl+Alt+Shift+S: stop/review"
+# CarbonEvents.h: kEventHotKeyPressed / kEventHotKeyReleased.
+MAC_HOTKEY_PRESSED = 5
+MAC_HOTKEY_RELEASED = 6
 
 
 def _binding_key(sequence):
@@ -255,8 +258,8 @@ class _MacHotkeys:
         carbon.GetEventParameter.argtypes = [pointer, ctypes.c_uint32, ctypes.c_uint32, pointer, ctypes.c_uint32, pointer, pointer]
         carbon.GetEventParameter.restype = status
         try:
-            specs = (_EventType * 2)(_EventType(int.from_bytes(b"keyb", "big"), 6),
-                                     _EventType(int.from_bytes(b"keyb", "big"), 7))
+            specs = (_EventType * 2)(_EventType(int.from_bytes(b"keyb", "big"), MAC_HOTKEY_PRESSED),
+                                     _EventType(int.from_bytes(b"keyb", "big"), MAC_HOTKEY_RELEASED))
             target = carbon.GetApplicationEventTarget()
             result = carbon.InstallEventHandler(target, self._handler_callback, 2, specs, None, ctypes.byref(self._handler))
             if result:
@@ -293,9 +296,10 @@ class _MacHotkeys:
             int.from_bytes(b"hkid", "big"), None, ctypes.sizeof(identifier), None, ctypes.byref(identifier))
         if (result == 0 and identifier.signature == int.from_bytes(b"StPr", "big")
                 and identifier.id in self._ids):
-            if self._carbon.GetEventKind(event) == 7:
+            kind = self._carbon.GetEventKind(event)
+            if kind == MAC_HOTKEY_RELEASED:
                 self._held.discard(identifier.id)
-            elif identifier.id not in self._held:
+            elif kind == MAC_HOTKEY_PRESSED and identifier.id not in self._held:
                 self._held.add(identifier.id)
                 self._callback({1: "pause", 2: "stop", 3: "start", 4: "capture"}.get(identifier.id, ""))
             return 0

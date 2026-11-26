@@ -177,6 +177,10 @@ Newer Wayland desktops also require an installed application identity; the Linux
 
 Screen capture requires Qt Multimedia's FFmpeg backend. Linux Wayland support is experimental in Qt and requires PipeWire and a screen-sharing portal; global shortcuts require a separate Global Shortcuts portal implementation. macOS needs screen-recording permission and microphone permission for narration. Source macOS users should launch through `venv/bin/python tools/run-macos-dev.py`.
 
+**macOS source-launch permissions:** When launched from Terminal, the Python development app can inherit Terminal as the application responsible for screen capture. In that case, enabling **StillPoint** or **StillPoint Dev** alone does not grant access. Enable the terminal application used to launch StillPoint under **System Settings → Privacy & Security → Screen & System Audio Recording**, then fully quit and reopen both the terminal application and StillPoint. This has been confirmed with Terminal; other launchers may have their own permission entry. The development wrapper supplies the microphone usage declaration but does not isolate screen-capture permissions from its launcher.
+
+The installed PyInstaller **StillPoint.app**, opened normally from Finder or Launchpad, should use StillPoint's own permission identity and should not require Terminal access. Grant StillPoint screen-recording permission and, for voice notes or narration, microphone permission. Launching the packaged executable directly from a terminal can still inherit the terminal's permission attribution.
+
 Full guide: [built-in help](sp/help-vault/Recording/Recording.md) and [website recording documentation](docs/recording.html).
 
 ## Keyboard Shortcuts

@@ -3,31 +3,39 @@ from __future__ import annotations
 
 import re
 import math
+import json
 from dataclasses import dataclass
 from pathlib import Path
-from PySide6.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSettings, QSize, QThread, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QGuiApplication, QIcon, QKeySequence, QPainter, QPainterPath, QPainterPathStroker, QPen, QPixmap, QPolygonF, QShortcut
+from PySide6.QtCore import QEvent, QMimeData, QObject, QPoint, QPointF, QRect, QRectF, QSettings, QSize, QThread, Qt, Signal
+from PySide6.QtGui import QColor, QCursor, QFont, QFontMetricsF, QGuiApplication, QIcon, QKeySequence, QPainter, QPainterPath, QPainterPathStroker, QPen, QPixmap, QPolygonF, QShortcut
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QColorDialog, QFormLayout,
     QGridLayout, QPlainTextEdit, QFrame, QKeySequenceEdit, QLabel, QMessageBox, QPushButton, QWidget)
 
 
 ASSETS = Path(__file__).resolve().parents[2] / "assets"
+ANNOTATION_MIME = "application/x-stillpoint-annotation+json"
 TOOLBAR_ICONS = {
     "Line": "line.svg", "Arrow": "arrow.svg", "Circle": "circle.svg",
-    "Box": "rectangle.svg", "Text overlay": "text.svg", "Color": "colors.svg",
+    "Box": "rectangle.svg", "Highlight": "highlight.svg", "Pixelate": "pixelate.svg", "Text overlay": "text.svg", "Color": "colors.svg",
     "Undo": "undo.svg", "Copy (Ctrl+C)": "clipboard.svg",
     "Attach (Ctrl+S)": "attachment-paperclip.svg",
     "Numbering": "numbering.svg", "Cancel": "cancel.svg", "Select": "select.svg", "Draw": "draw.svg",
 }
 
-TOOL_KEYS = {"Draw": "D", "Numbering": "1", "Select": "S", "Line": "L", "Arrow": "A", "Box": "B", "Circle": "C", "Text overlay": "T"}
-ACTION_KEYS = {"Color": "P", "Undo": "U", "Cancel": "Esc"}
+TOOL_KEYS = {"Draw": "D", "Highlight": "H", "Pixelate": "P", "Numbering": "1", "Select": "V", "Line": "L", "Arrow": "A", "Box": "S", "Circle": "O", "Text overlay": "T"}
+ACTION_KEYS = {"Color": "C", "Undo": "U", "Cancel": "Esc"}
 
 
 @dataclass(frozen=True)
 class TextAnnotation:
     text: str
     size: int = 18
+
+
+@dataclass(frozen=True)
+class HighlightStroke:
+    points: tuple
+    width: int = 18
 
 
 def _text_data(value):
@@ -39,7 +47,7 @@ def _text_font(value):
 
 
 class ImageSaveKeyFilter(QObject):
-    """Claim image Save before the main page's application-wide shortcut."""
+    """Claim image editing keys before the main page's shortcuts."""
     def __init__(self, owner, callback, canvas=None):
         super().__init__(owner)
         self.owner = owner
@@ -61,12 +69,19 @@ class ImageSaveKeyFilter(QObject):
         if not belongs:
             return False
         modifiers = event.modifiers()
-        if (event.key() != Qt.Key_S or not modifiers & (Qt.ControlModifier | Qt.MetaModifier)
+        if (event.key() not in (Qt.Key_S, Qt.Key_C, Qt.Key_V) or not modifiers & (Qt.ControlModifier | Qt.MetaModifier)
                 or modifiers & (Qt.ShiftModifier | Qt.AltModifier)):
             return False
+        callback = self.callback
+        if event.key() != Qt.Key_S:
+            canvas = self.canvas if self.canvas is not None else self.owner
+            # Inline text keeps normal text-selection copy/paste behavior.
+            if canvas._text_start is not None:
+                return False
+            callback = canvas.copy_selection_or_image if event.key() == Qt.Key_C else canvas.paste_annotation
         event.accept()
         if event.type() == QEvent.KeyPress and not event.isAutoRepeat():
-            self.callback()
+            callback()
         return True
 
 
@@ -94,8 +109,6 @@ class CanvasTextEdit(QPlainTextEdit):
             self.overlay._finish_text()
         elif modified and event.key() == Qt.Key_S:
             self.overlay.save_attachment()
-        elif modified and event.key() == Qt.Key_C:
-            self.overlay.copy_image()
         else:
             super().keyPressEvent(event)
 
@@ -141,6 +154,8 @@ class ScreenCaptureOverlay(QWidget):
         self._drag_original = None
         self._drag_snapshot = None
         self._text_size = 18
+        self._highlight_width = 18
+        self._pixelate_width = 36
         self._text_index = None
         self._text_before = None
         self._text_start = None
@@ -150,6 +165,9 @@ class ScreenCaptureOverlay(QWidget):
         self.color = QColor(self.settings.value("screenCapture/color", "#ff0000"))
         if not self.color.isValid():
             self.color = QColor("#ff0000")
+        self.highlight_color = QColor(self.settings.value("screenCapture/highlightColor", "#ffff00"))
+        if not self.highlight_color.isValid():
+            self.highlight_color = QColor("#ffff00")
         self.setCursor(Qt.CrossCursor)
         self.toolbar = QWidget(self)
         self.toolbar.setStyleSheet("QWidget {background: #252525; color: white;} QPushButton {padding: 6px; border: 1px solid #777;} QPushButton:checked {background: #555;}")
@@ -157,7 +175,7 @@ class ScreenCaptureOverlay(QWidget):
         column = 0
         self.tools = QButtonGroup(self)
         self.tool_buttons = {}
-        for tool in ("Select", "Draw", "Line", "Arrow", "Circle", "Box", "Numbering", "Text overlay"):
+        for tool in ("Select", "Draw", "Highlight", "Pixelate", "Line", "Arrow", "Circle", "Box", "Numbering", "Text overlay"):
             button = self._toolbar_button(tool)
             button.setCheckable(True)
             button.setChecked(tool == self.tool)
@@ -195,9 +213,9 @@ class ScreenCaptureOverlay(QWidget):
         self.hint.setStyleSheet("background: #252525; color: white; padding: 8px;")
         self.hint.adjustSize()
         self.hint.move(20, 20)
-        for key, callback in (("Ctrl+C", self.copy_image), ("Ctrl+S", self.save_attachment),
+        for key, callback in (("Ctrl+C", self.copy_selection_or_image), ("Ctrl+V", self.paste_annotation), ("Ctrl+S", self.save_attachment),
                               ("Ctrl+Z", self.undo), ("Escape", self.close),
-                              ("P", self.choose_color), ("U", self.undo)):
+                              ("C", self.choose_color), ("U", self.undo)):
             shortcut = QShortcut(QKeySequence(key), self)
             shortcut.activated.connect(callback)
 
@@ -210,18 +228,19 @@ class ScreenCaptureOverlay(QWidget):
         button = QPushButton()
         key = TOOL_KEYS.get(label) or ACTION_KEYS.get(label)
         button.setToolTip(f"{label} ({key})" if key else label)
+        if label in ("Highlight", "Pixelate"):
+            button.setToolTip(f"{label} ({key}) · Ctrl/Cmd+scroll to change size")
         button.setAccessibleName(label)
         asset = TOOLBAR_ICONS.get(label)
         if asset:
             icon = QIcon(str(ASSETS / asset))
-            if label != "Color":
-                # Monochrome assets need light strokes on the dark capture bar.
-                pixmap = icon.pixmap(QSize(24, 24))
-                painter = QPainter(pixmap)
-                painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
-                painter.fillRect(pixmap.rect(), QColor("#ffffff"))
-                painter.end()
-                icon = QIcon(pixmap)
+            # All assets, including the palette, need light strokes on the dark bar.
+            pixmap = icon.pixmap(QSize(24, 24))
+            painter = QPainter(pixmap)
+            painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+            painter.fillRect(pixmap.rect(), QColor("#ffffff"))
+            painter.end()
+            icon = QIcon(pixmap)
             button.setIcon(icon)
             button.setIconSize(QSize(24, 24))
             button.setFixedSize(40, 40)
@@ -327,8 +346,37 @@ class ScreenCaptureOverlay(QWidget):
     def wheelEvent(self, event):
         if self._text_start is not None and event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier):
             self._resize_text_from_wheel(event)
+        elif self.tool == "Highlight" and event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier):
+            self._resize_highlight_from_wheel(event)
+        elif self.tool == "Pixelate" and event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier):
+            self._resize_pixelate_from_wheel(event)
         else:
             super().wheelEvent(event)
+
+    def _resize_highlight_from_wheel(self, event):
+        delta = event.angleDelta().y() or event.pixelDelta().y()
+        if delta:
+            self._highlight_width = max(4, min(144, self._highlight_width + (2 if delta > 0 else -2)))
+            self.tool_buttons["Highlight"].setToolTip(
+                f"Highlight (H) · {self._highlight_width} px · Ctrl/Cmd+scroll to change thickness")
+            self.update()
+        event.accept()
+
+    def _stroke_payload(self):
+        if self.tool == "Highlight":
+            return HighlightStroke(tuple(self._stroke_points), self._highlight_width)
+        if self.tool == "Pixelate":
+            return HighlightStroke(tuple(self._stroke_points), self._pixelate_width)
+        return tuple(self._stroke_points) if self.tool == "Draw" else ""
+
+    def _resize_pixelate_from_wheel(self, event):
+        delta = event.angleDelta().y() or event.pixelDelta().y()
+        if delta:
+            self._pixelate_width = max(12, min(144, self._pixelate_width + (4 if delta > 0 else -4)))
+            self.tool_buttons["Pixelate"].setToolTip(
+                f"Pixelate (P) · {self._pixelate_width} px · Ctrl/Cmd+scroll to change size")
+            self.update()
+        event.accept()
 
     def mouseDoubleClickEvent(self, event):
         if self._selected and event.button() == Qt.LeftButton and self.selection.contains(event.position().toPoint()):
@@ -338,11 +386,21 @@ class ScreenCaptureOverlay(QWidget):
                 return
         super().mouseDoubleClickEvent(event)
 
+    def _active_color(self):
+        return self.highlight_color if self.tool == "Highlight" else self.color
+
     def choose_color(self):
-        color = QColorDialog.getColor(self.color, self, "Annotation color")
+        highlighting = self.tool == "Highlight"
+        color = QColorDialog.getColor(self._active_color(), self,
+                                      "Highlight color" if highlighting else "Annotation color")
         if color.isValid():
-            self.color = color
-            self.settings.setValue("screenCapture/color", color.name(QColor.HexArgb))
+            if highlighting:
+                self.highlight_color = color
+            else:
+                self.color = color
+            key = "screenCapture/highlightColor" if highlighting else "screenCapture/color"
+            self.settings.setValue(key, color.name(QColor.HexArgb))
+            self.update()
 
     def undo(self):
         self._finish_text()
@@ -377,6 +435,18 @@ class ScreenCaptureOverlay(QWidget):
                 path.closeSubpath()
         elif tool == "Circle":
             path.addEllipse(rect)
+        elif tool in ("Highlight", "Pixelate"):
+            if len(text.points) > 1:
+                path.moveTo(text.points[0])
+                for point in text.points[1:]:
+                    path.lineTo(point)
+                stroker = QPainterPathStroker()
+                stroker.setWidth(text.width)
+                stroker.setCapStyle(Qt.RoundCap)
+                stroker.setJoinStyle(Qt.RoundJoin)
+                path = stroker.createStroke(path)
+            else:
+                path.addEllipse(start, text.width / 2, text.width / 2)
         elif tool == "Box":
             path.addRect(rect)
         elif tool == "Numbering":
@@ -422,10 +492,12 @@ class ScreenCaptureOverlay(QWidget):
         tool, start, end, color, text = self._drag_original
         if tool == "Draw":
             text = tuple(point + delta for point in text)
+        elif tool in ("Highlight", "Pixelate"):
+            text = HighlightStroke(tuple(point + delta for point in text.points), text.width)
         self.annotations[self._selected_annotation] = (tool, start + delta, end + delta, color, text)
 
     @staticmethod
-    def draw_annotation(painter, annotation):
+    def draw_annotation(painter, annotation, desktop=None):
         tool, start, end, color, text = annotation
         painter.setPen(QPen(color, 3, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         painter.setBrush(Qt.NoBrush)
@@ -446,6 +518,30 @@ class ScreenCaptureOverlay(QWidget):
             painter.drawEllipse(rect)
         elif tool == "Box":
             painter.drawRect(rect)
+        elif tool == "Highlight":
+            highlight = QColor(color)
+            highlight.setAlphaF(highlight.alphaF() * .3)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(highlight)
+            painter.drawPath(ScreenCaptureOverlay._annotation_path(annotation))
+        elif tool == "Pixelate" and desktop is not None:
+            path = ScreenCaptureOverlay._annotation_path(annotation)
+            bounds = path.boundingRect().toAlignedRect().intersected(
+                QRect(0, 0, round(desktop.width() / desktop.devicePixelRatio()),
+                      round(desktop.height() / desktop.devicePixelRatio())))
+            if not bounds.isEmpty():
+                scale = desktop.devicePixelRatio()
+                source = desktop.toImage().copy(QRect(round(bounds.x() * scale), round(bounds.y() * scale),
+                    round(bounds.width() * scale), round(bounds.height() * scale)))
+                # Average away fine details, then enlarge with hard mosaic edges.
+                block = max(12, text.width // 2)
+                mosaic = source.scaled(max(1, math.ceil(bounds.width() / block)),
+                    max(1, math.ceil(bounds.height() / block)), Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+                painter.save()
+                painter.setClipPath(path, Qt.IntersectClip)
+                painter.setRenderHint(QPainter.SmoothPixmapTransform, False)
+                painter.drawImage(QRectF(bounds), mosaic)
+                painter.restore()
         else:
             painter.setFont(QFont("Sans Serif", 18, QFont.Bold))
             if tool == "Numbering":
@@ -471,15 +567,15 @@ class ScreenCaptureOverlay(QWidget):
             painter.setRenderHint(QPainter.Antialiasing)
             for index, annotation in enumerate(self.annotations):
                 if self._text_start is None or index != self._text_index:
-                    self.draw_annotation(painter, annotation)
+                    self.draw_annotation(painter, annotation, self.desktop)
             if self.tool == "Select" and self._selected_annotation is not None:
                 bounds = self._annotation_path(self.annotations[self._selected_annotation]).boundingRect().adjusted(-5, -5, 5, 5)
                 painter.setBrush(Qt.NoBrush)
                 painter.setPen(QPen(QColor("#00bfff"), 1, Qt.DashLine))
                 painter.drawRect(bounds)
             if self._selected and self._anchor is not None and self.tool != "Select":
-                payload = tuple(self._stroke_points) if self.tool == "Draw" else ""
-                self.draw_annotation(painter, (self.tool, self._anchor, self._current, self.color, payload))
+                payload = self._stroke_payload()
+                self.draw_annotation(painter, (self.tool, self._anchor, self._current, self._active_color(), payload), self.desktop)
             painter.restore()
             painter.setPen(QPen(Qt.white, 1, Qt.DashLine))
             painter.drawRect(self.selection.adjusted(0, 0, -1, -1))
@@ -530,7 +626,7 @@ class ScreenCaptureOverlay(QWidget):
         point = QPoint(max(bounds.left(), min(bounds.right(), point.x())),
                        max(bounds.top(), min(bounds.bottom(), point.y())))
         self._current = QPointF(point)
-        if self._selected and self.tool == "Draw" and self._stroke_points[-1] != self._current:
+        if self._selected and self.tool in ("Draw", "Highlight", "Pixelate") and self._stroke_points[-1] != self._current:
             self._stroke_points.append(self._current)
         if not self._selected:
             self.selection = QRect(self._anchor.toPoint(), point).normalized().intersected(self.rect())
@@ -544,8 +640,8 @@ class ScreenCaptureOverlay(QWidget):
             self._finish_move()
         elif self._selected:
             self._history.append(list(self.annotations))
-            payload = tuple(self._stroke_points) if self.tool == "Draw" else ""
-            self.annotations.append((self.tool, self._anchor, self._current, QColor(self.color), payload))
+            payload = self._stroke_payload()
+            self.annotations.append((self.tool, self._anchor, self._current, QColor(self._active_color()), payload))
         elif self.selection.width() >= 3 and self.selection.height() >= 3:
             self._selected = True
             self.hint.hide()
@@ -569,9 +665,81 @@ class ScreenCaptureOverlay(QWidget):
         painter.translate(-self.selection.x(), -self.selection.y())
         painter.setClipRect(self.selection)
         for annotation in self.annotations:
-            self.draw_annotation(painter, annotation)
+            self.draw_annotation(painter, annotation, self.desktop)
         painter.end()
         return image
+
+    def copy_selection_or_image(self):
+        index = self._selected_annotation
+        if index is None or not 0 <= index < len(self.annotations):
+            self.copy_image()
+            return
+        self._finish_move()
+        tool, start, end, color, payload = self.annotations[index]
+        origin = QPointF(self.selection.topLeft())
+        def point(value):
+            value = value - origin
+            return [value.x(), value.y()]
+        if tool == "Draw":
+            payload = [point(value) for value in payload]
+        elif tool in ("Highlight", "Pixelate"):
+            payload = {"points": [point(value) for value in payload.points], "width": payload.width}
+        elif tool == "Text overlay":
+            data = _text_data(payload)
+            payload = {"text": data.text, "size": data.size}
+        mime = QMimeData()
+        mime.setData(ANNOTATION_MIME, json.dumps({"tool": tool, "start": point(start),
+            "end": point(end), "color": color.name(QColor.HexArgb), "payload": payload}).encode())
+        QApplication.clipboard().setMimeData(mime)
+        self._paste_data = None
+
+    def paste_annotation(self):
+        if not self._selected or self._text_start is not None:
+            return
+        raw = bytes(QApplication.clipboard().mimeData().data(ANNOTATION_MIME))
+        if not raw:
+            return
+        try:
+            data = json.loads(raw)
+            tool, payload = data["tool"], data["payload"]
+            if tool not in TOOL_KEYS or tool == "Select":
+                return
+            def point(value):
+                x, y = value
+                if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in (x, y)):
+                    raise ValueError("Invalid annotation position")
+                return QPointF(x, y) + QPointF(self.selection.topLeft())
+            start, end = point(data["start"]), point(data["end"])
+            color = QColor(data["color"])
+            if not color.isValid():
+                return
+            if tool == "Draw":
+                payload = tuple(point(value) for value in payload)
+            elif tool in ("Highlight", "Pixelate"):
+                if not isinstance(payload["width"], int) or not 4 <= payload["width"] <= 144:
+                    return
+                payload = HighlightStroke(tuple(point(value) for value in payload["points"]), payload["width"])
+            elif tool == "Text overlay":
+                if not isinstance(payload["text"], str) or not 1 <= payload["size"] <= 512:
+                    return
+                payload = TextAnnotation(payload["text"], int(payload["size"]))
+            elif not isinstance(payload, str):
+                return
+        except (ValueError, TypeError, KeyError, OverflowError):
+            return
+        self._set_tool("Select")
+        count = getattr(self, "_paste_count", 0) + 1 if getattr(self, "_paste_data", None) == raw else 1
+        self._paste_data, self._paste_count = raw, count
+        annotation = (tool, start, end, color, payload)
+        self._history.append(list(self.annotations))
+        self.annotations.append(annotation)
+        self._selected_annotation = len(self.annotations) - 1
+        self._anchor = QPointF()
+        self._drag_original = annotation
+        self._move_annotation(QPointF(16 * count, 16 * count))
+        self._drag_original = None
+        self._anchor = None
+        self.update()
 
     def copy_image(self):
         image = self.rendered_image()
@@ -595,8 +763,8 @@ class ScreenCaptureOverlay(QWidget):
         self.close()
 
 
-def capture_desktop():
-    screens = QGuiApplication.screens()
+def capture_desktop(screen=None):
+    screens = [screen] if screen is not None else QGuiApplication.screens()
     geometry = QRect()
     for screen in screens:
         geometry = geometry.united(screen.geometry())
@@ -684,9 +852,16 @@ class _PortalScreenshotWorker(QThread):
 
 def start_capture(parent, save_image, opened):
     from PySide6.QtCore import QTimer, QUrl
+    # Snapshot the pointer's display before the deferred capture or portal
+    # prompt, which may move focus (or the pointer) to another display.
+    target = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
     # Give command palette/popups time to disappear before freezing the desktop.
     def show(desktop, geometry):
         overlay = ScreenCaptureOverlay(desktop, geometry, save_image)
+        screen = QGuiApplication.screenAt(geometry.center())
+        if screen is not None:
+            overlay.setScreen(screen)
+            overlay.setGeometry(geometry)
         opened(overlay)
         overlay.show()
         overlay.raise_()
@@ -694,6 +869,11 @@ def start_capture(parent, save_image, opened):
     def failed(message):
         QMessageBox.warning(parent, "Screen capture unavailable", message)
     def begin():
+        screen = target if target in QGuiApplication.screens() else QGuiApplication.primaryScreen()
+        if screen is None:
+            failed("No display is available for screen capture.")
+            return
+        target_geometry = screen.geometry()
         if QGuiApplication.platformName().lower().startswith("wayland"):
             worker = _PortalScreenshotWorker(QApplication.instance())
             QApplication.instance().aboutToQuit.connect(worker.cancel)
@@ -706,8 +886,14 @@ def start_capture(parent, save_image, opened):
                 geometry = QRect()
                 for screen in QGuiApplication.screens():
                     geometry = geometry.united(screen.geometry())
-                desktop.setDevicePixelRatio(desktop.width() / max(1, geometry.width()))
-                show(desktop, geometry)
+                scale = desktop.width() / max(1, geometry.width())
+                # The portal returns the desktop; isolate the pointer's display
+                # so the region selector and toolbar share its local coordinates.
+                rect = target_geometry.translated(-geometry.topLeft())
+                desktop = desktop.copy(QRect(round(rect.x() * scale), round(rect.y() * scale),
+                    round(rect.width() * scale), round(rect.height() * scale)))
+                desktop.setDevicePixelRatio(scale)
+                show(desktop, target_geometry)
             worker.ready.connect(ready)
             worker.failed.connect(failed)
             worker.finished.connect(worker.deleteLater)
@@ -715,7 +901,7 @@ def start_capture(parent, save_image, opened):
             worker.start()
         else:
             try:
-                show(*capture_desktop())
+                show(*capture_desktop(screen))
             except Exception as exc:
                 failed(str(exc))
     if getattr(parent, "_screenshot_pending", False):

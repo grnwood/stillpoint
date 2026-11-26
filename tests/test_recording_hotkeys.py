@@ -99,11 +99,11 @@ def test_windows_registration_uses_no_repeat_and_rolls_back_conflicts(qapp, monk
     assert registered == [(0x5350, 0x4007, ord("P")), (0x5351, 0x4007, ord("S"))]
 
 
-@pytest.mark.parametrize("start_only", [False, True])
-def test_macos_uses_physical_control_and_ignores_held_key_repeats(qapp, monkeypatch, start_only):
+@pytest.mark.parametrize("mode", ["recording", "start", "capture"])
+def test_macos_uses_physical_control_and_ignores_held_key_repeats(qapp, monkeypatch, mode):
     registered, unregistered, removed = [], [], []
-    kind = [6]
-    identifier_to_deliver = [3 if start_only else 1]
+    kind = [5]  # Actual Carbon kEventHotKeyPressed, not the release event.
+    identifier_to_deliver = [{"start": 3, "capture": 4, "recording": 1}[mode]]
 
     def register(code, modifiers, identifier, target, options, output):
         registered.append((code, modifiers, identifier.id))
@@ -112,7 +112,7 @@ def test_macos_uses_physical_control_and_ignores_held_key_repeats(qapp, monkeypa
 
     def install(target, callback, count, specs, data, output):
         assert count == 2
-        assert [specs[index].eventKind for index in range(count)] == [6, 7]
+        assert [specs[index].eventKind for index in range(count)] == [5, 6]
         output._obj.value = 99
         return 0
 
@@ -132,22 +132,33 @@ def test_macos_uses_physical_control_and_ignores_held_key_repeats(qapp, monkeypa
     )
     monkeypatch.setattr(ctypes, "CDLL", lambda path: carbon)
     received = []
-    backend = hotkeys._MacHotkeys(received.append, hotkeys.START_BINDINGS if start_only else hotkeys.BINDINGS)
-    expected = [(15, 4096 | 2048 | 512, 3)] if start_only else [(35, 4096 | 2048 | 512, 1), (1, 4096 | 2048 | 512, 2)]
+    bindings = {"start": hotkeys.START_BINDINGS, "recording": hotkeys.BINDINGS,
+                "capture": (("capture", "Alt+Shift+S", "Capture screen region"),)}[mode]
+    backend = hotkeys._MacHotkeys(received.append, bindings)
+    expected = {"start": [(15, 4096 | 2048 | 512, 3)],
+                "capture": [(1, 2048 | 512, 4)],
+                "recording": [(35, 4096 | 2048 | 512, 1), (1, 4096 | 2048 | 512, 2)]}[mode]
     assert registered == expected
     backend._event(None, None, None)
     backend._event(None, None, None)
-    kind[0] = 7
-    backend._event(None, None, None)
     kind[0] = 6
     backend._event(None, None, None)
-    expected_action = "start" if start_only else "pause"
+    kind[0] = 5
+    backend._event(None, None, None)
+    expected_action = {"start": "start", "capture": "capture", "recording": "pause"}[mode]
     assert received == [expected_action, expected_action]
-    identifier_to_deliver[0] = 1 if start_only else 3
+    # Release and press again: the binding stays live after repeated captures.
+    for _ in range(3):
+        kind[0] = 6
+        backend._event(None, None, None)
+        kind[0] = 5
+        backend._event(None, None, None)
+    assert received == [expected_action] * 5
+    identifier_to_deliver[0] = 1 if mode in ("start", "capture") else 3
     assert backend._event(None, None, None) == -9874
-    assert received == [expected_action, expected_action]
+    assert received == [expected_action] * 5
     backend.close()
-    assert unregistered == ([103] if start_only else [101, 102])
+    assert unregistered == {"start": [103], "capture": [104], "recording": [101, 102]}[mode]
     assert removed == [99]
 
 

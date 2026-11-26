@@ -26,6 +26,206 @@ def overlay(qtbot, save=None, scale=1):
     return widget
 
 
+def test_capture_desktop_isolates_selected_display_with_native_scale(qapp, monkeypatch):
+    from types import SimpleNamespace
+    geometry = QRect(-300, -100, 300, 200)
+    captured = QPixmap(600, 400)
+    captured.fill(Qt.red)
+    captured.setDevicePixelRatio(2)
+    selected = SimpleNamespace(geometry=lambda: geometry, devicePixelRatio=lambda: 2,
+                               grabWindow=lambda _: captured)
+    desktop, bounds = screen_capture.capture_desktop(selected)
+    assert bounds == geometry
+    assert desktop.size() == captured.size()
+    assert desktop.devicePixelRatio() == 2
+    assert desktop.toImage().pixelColor(200, 100) == QColor("red")
+
+
+def test_capture_uses_pointer_display_at_invocation(qtbot, monkeypatch):
+    from types import SimpleNamespace
+    from PySide6.QtCore import QTimer
+    primary = SimpleNamespace(geometry=lambda: QRect(0, 0, 400, 300))
+    other = SimpleNamespace(geometry=lambda: QRect(-400, 0, 400, 300))
+    pointer = [QPoint(-100, 100)]
+    monkeypatch.setattr(screen_capture.QCursor, "pos", lambda: pointer[0])
+    monkeypatch.setattr(screen_capture.QGuiApplication, "screens", lambda: [primary, other])
+    monkeypatch.setattr(screen_capture.QGuiApplication, "primaryScreen", lambda: primary)
+    monkeypatch.setattr(screen_capture.QGuiApplication, "screenAt", lambda pos: other if pos.x() < 0 else primary)
+    monkeypatch.setattr(screen_capture.QGuiApplication, "platformName", lambda: "cocoa")
+    pending, captured, shown = [], [], []
+    monkeypatch.setattr(QTimer, "singleShot", lambda delay, callback: pending.append(callback))
+    def capture(screen):
+        captured.append(screen)
+        return QPixmap(400, 300), screen.geometry()
+    monkeypatch.setattr(screen_capture, "capture_desktop", capture)
+    class Overlay:
+        def __init__(self, desktop, geometry, save):
+            self.geometry = geometry
+        def setScreen(self, screen):
+            self.screen = screen
+        def setGeometry(self, geometry):
+            self.geometry = geometry
+        def show(self): pass
+        def raise_(self): pass
+        def activateWindow(self): pass
+    monkeypatch.setattr(screen_capture, "ScreenCaptureOverlay", Overlay)
+    parent = SimpleNamespace()
+    screen_capture.start_capture(parent, None, shown.append)
+    pointer[0] = QPoint(100, 100)
+    pending.pop()()
+    assert captured == [other]
+    assert shown[0].screen is other
+    assert shown[0].geometry == QRect(-400, 0, 400, 300)
+
+
+@pytest.mark.parametrize("tool", ["Line", "Arrow", "Circle", "Box", "Highlight", "Pixelate", "Numbering", "Text overlay", "Draw"])
+@pytest.mark.parametrize("modifier", [Qt.ControlModifier, Qt.MetaModifier])
+def test_selected_item_clipboard_duplicate_and_undo(qtbot, tool, modifier):
+    widget = overlay(qtbot)
+    widget.show()
+    payload = {"Text overlay": screen_capture.TextAnnotation("Hello", 22),
+               "Highlight": screen_capture.HighlightStroke((QPointF(60, 75), QPointF(80, 95)), 12),
+               "Pixelate": screen_capture.HighlightStroke((QPointF(60, 75), QPointF(80, 95)), 12),
+               "Draw": (QPointF(60, 75), QPointF(80, 95))}.get(tool, "1" if tool == "Numbering" else "")
+    original = (tool, QPointF(60, 75), QPointF(80, 95), QColor("#80ff0000"), payload)
+    widget.annotations = [original]
+    widget._set_tool("Select")
+    widget._selected_annotation = 0
+    QTest.keyClick(widget, Qt.Key_C, modifier)
+    QTest.keyClick(widget, Qt.Key_V, modifier)
+    assert widget.isVisible()
+    assert len(widget.annotations) == 2
+    duplicate = widget.annotations[1]
+    assert duplicate[0] == tool
+    assert duplicate[1] == original[1] + QPointF(16, 16)
+    assert duplicate[3] == original[3]
+    expected_payload = tuple(p + QPointF(16, 16) for p in payload) if tool == "Draw" else payload
+    if tool in ("Highlight", "Pixelate"):
+        expected_payload = screen_capture.HighlightStroke(tuple(p + QPointF(16, 16) for p in payload.points), payload.width)
+    assert duplicate[4] == expected_payload
+    assert widget._selected_annotation == 1
+    QTest.keyClick(widget, Qt.Key_V, modifier)
+    assert widget.annotations[2][1] == original[1] + QPointF(32, 32)
+    widget.undo()
+    assert len(widget.annotations) == 2
+    widget.undo()
+    assert widget.annotations == [original]
+    widget.close()
+
+
+def test_inline_text_retains_text_copy_paste(qtbot):
+    widget = overlay(qtbot)
+    widget.show()
+    widget._begin_text(QPointF(60, 90))
+    QTest.keyClicks(widget.text_editor, "Hello")
+    widget.text_editor.selectAll()
+    QTest.keyClick(widget.text_editor, Qt.Key_C, Qt.ControlModifier)
+    assert QApplication.clipboard().text() == "Hello"
+    QTest.keyClick(widget.text_editor, Qt.Key_Right)
+    QTest.keyClick(widget.text_editor, Qt.Key_V, Qt.ControlModifier)
+    assert widget.text_editor.toPlainText() == "HelloHello"
+    widget.close()
+
+
+def test_highlight_swipe_resizes_renders_translucently_and_undoes(qtbot):
+    from PySide6.QtGui import QWheelEvent
+    widget = overlay(qtbot)
+    widget.show()
+    QTest.keyClick(widget, Qt.Key_H)
+    assert widget.tool == "Highlight"
+    event = QWheelEvent(QPointF(60, 90), QPointF(60, 90), QPoint(), QPoint(0, 120),
+                        Qt.NoButton, Qt.ControlModifier, Qt.NoScrollPhase, False)
+    widget.wheelEvent(event)
+    assert widget._highlight_width == 20
+    QTest.mousePress(widget, Qt.LeftButton, pos=QPoint(60, 90))
+    QTest.mouseMove(widget, QPoint(100, 90))
+    QTest.mouseRelease(widget, Qt.LeftButton, pos=QPoint(140, 90))
+    assert widget.annotations[0][4].width == 20
+    image = widget.rendered_image()
+    tinted = image.pixelColor(80, 60)  # Canvas (100,90), relative to region (20,30).
+    assert tinted.red() == 255
+    assert tinted.green() == 255
+    assert 150 < tinted.blue() < 220
+    assert image.pixelColor(80, 40) == QColor("white")
+    assert widget._hit_annotation(QPointF(100, 90)) == 0
+    widget.undo()
+    assert widget.annotations == []
+    widget.close()
+
+
+def test_highlight_color_is_independent_and_persisted(qtbot, monkeypatch):
+    widget = overlay(qtbot)
+    widget.show()
+    assert widget.highlight_color == QColor("yellow")
+    widget._set_tool("Highlight")
+    initial = []
+    def choose(current, owner, title):
+        initial.append((QColor(current), title))
+        return QColor("lime")
+    monkeypatch.setattr(screen_capture.QColorDialog, "getColor", choose)
+    widget.choose_color()
+    assert initial == [(QColor("yellow"), "Highlight color")]
+    assert widget.color == QColor("red")
+    assert widget.highlight_color == QColor("lime")
+    QTest.mousePress(widget, Qt.LeftButton, pos=QPoint(60, 90))
+    QTest.mouseRelease(widget, Qt.LeftButton, pos=QPoint(100, 90))
+    assert widget.annotations[-1][3] == QColor("lime")
+    widget._set_tool("Line")
+    monkeypatch.setattr(screen_capture.QColorDialog, "getColor", lambda *args: QColor("blue"))
+    widget.choose_color()
+    assert widget.color == QColor("blue")
+    assert widget.highlight_color == QColor("lime")
+    second = overlay(qtbot)
+    assert second.color == QColor("blue")
+    assert second.highlight_color == QColor("lime")
+    widget.close()
+    second.close()
+
+
+def test_palette_icon_is_white(qtbot):
+    widget = overlay(qtbot)
+    button = next(button for button in widget.toolbar.findChildren(screen_capture.QPushButton)
+                  if button.accessibleName() == "Color")
+    image = button.icon().pixmap(24, 24).toImage()
+    colors = [image.pixelColor(x, y) for x in range(image.width()) for y in range(image.height())
+              if image.pixelColor(x, y).alpha() > 200]
+    assert colors
+    assert all(c.red() == c.green() == c.blue() == 255 for c in colors)
+    widget.close()
+
+
+@pytest.mark.parametrize("scale", [1, 2])
+def test_pixelate_swipe_removes_fine_detail_and_preserves_outside(qtbot, scale):
+    from PySide6.QtGui import QPainter, QWheelEvent
+    widget = overlay(qtbot, scale=scale)
+    widget.show()
+    # Fine black/white stripes become solid averaged mosaic blocks.
+    painter = QPainter(widget.desktop)
+    painter.setPen(Qt.black)
+    for x in range(40, 161, 2):
+        painter.drawLine(x, 50, x, 130)
+    painter.end()
+    before = widget.rendered_image()
+    QTest.keyClick(widget, Qt.Key_P)
+    assert widget.tool == "Pixelate"
+    event = QWheelEvent(QPointF(60, 90), QPointF(60, 90), QPoint(), QPoint(0, 120),
+                        Qt.NoButton, Qt.ControlModifier, Qt.NoScrollPhase, False)
+    widget.wheelEvent(event)
+    assert widget._pixelate_width == 40
+    QTest.mousePress(widget, Qt.LeftButton, pos=QPoint(60, 90))
+    QTest.mouseMove(widget, QPoint(100, 90))
+    QTest.mouseRelease(widget, Qt.LeftButton, pos=QPoint(140, 90))
+    after = widget.rendered_image()
+    values = [after.pixelColor(x * scale, 60 * scale).red() for x in range(65, 85)]
+    assert all(30 < value < 225 for value in values)
+    assert len(set(values)) <= 3
+    assert after.pixelColor(80 * scale, 25 * scale) == before.pixelColor(80 * scale, 25 * scale)
+    assert widget._hit_annotation(QPointF(100, 90)) == 0
+    widget.undo()
+    assert widget.rendered_image() == before
+    widget.close()
+
+
 def test_region_selection_and_all_annotations_render_without_controls(qtbot):
     widget = overlay(qtbot)
     assert widget._selected
@@ -182,7 +382,8 @@ def test_wayland_screenshot_portal_early_response(qapp, monkeypatch, allowed):
 
 def test_tool_keys_update_checked_buttons_and_actions(qtbot, monkeypatch):
     widget = overlay(qtbot)
-    for key, tool in ((Qt.Key_A, "Arrow"), (Qt.Key_B, "Box"), (Qt.Key_C, "Circle"),
+    for key, tool in ((Qt.Key_A, "Arrow"), (Qt.Key_S, "Box"), (Qt.Key_O, "Circle"),
+                      (Qt.Key_V, "Select"), (Qt.Key_P, "Pixelate"),
                       (Qt.Key_T, "Text overlay"), (Qt.Key_L, "Line")):
         QTest.keyClick(widget, key)
         assert widget.tool == tool
@@ -191,7 +392,7 @@ def test_tool_keys_update_checked_buttons_and_actions(qtbot, monkeypatch):
     QTest.keyClick(widget, Qt.Key_U)
     assert not widget.annotations
     monkeypatch.setattr(screen_capture.QColorDialog, "getColor", lambda *args: QColor("blue"))
-    QTest.keyClick(widget, Qt.Key_P)
+    QTest.keyClick(widget, Qt.Key_C)
     assert widget.color == QColor("blue")
     QTest.keyClick(widget, Qt.Key_Escape)
     assert not widget.isVisible()
@@ -206,7 +407,7 @@ def test_select_moves_each_annotation_and_undo_restores(qtbot, tool, point, text
     widget = overlay(qtbot)
     original = (tool, QPointF(60, 60), QPointF(100, 100), QColor("red"), text)
     widget.annotations = [original]
-    QTest.keyClick(widget, Qt.Key_S)
+    QTest.keyClick(widget, Qt.Key_V)
     assert widget.tool == "Select"
     assert widget.tool_buttons["Select"].isChecked()
     QTest.mousePress(widget, Qt.LeftButton, pos=point)
@@ -255,7 +456,7 @@ def test_freehand_stroke_renders_moves_and_undoes(qtbot):
     assert original[4] == tuple(QPointF(point) for point in points)
     image = widget.rendered_image()
     assert image.pixelColor(80-widget.selection.x(), 100-widget.selection.y()).green() < 100
-    QTest.keyClick(widget, Qt.Key_S)
+    QTest.keyClick(widget, Qt.Key_V)
     QTest.mousePress(widget, Qt.LeftButton, pos=points[1])
     assert widget._selected_annotation == 0
     QTest.mouseRelease(widget, Qt.LeftButton, pos=points[1] + QPoint(15, 20))

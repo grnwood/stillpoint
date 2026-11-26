@@ -29,6 +29,58 @@ def add_line(window):
     window.canvas.annotations.append(("Line", QPointF(30, 30), QPointF(90, 30), QColor("red"), ""))
 
 
+def test_item_copy_paste_from_toolbar_and_canvas(qtbot, image_path):
+    window = module.ImageEditorWindow(image_path)
+    qtbot.addWidget(window)
+    window.show()
+    add_line(window)
+    window.canvas._selected_annotation = 0
+    QTest.keyClick(window.save_button, Qt.Key_C, Qt.ControlModifier)
+    QTest.keyClick(window.canvas, Qt.Key_V, Qt.ControlModifier)
+    assert len(window.canvas.annotations) == 2
+    assert window.canvas.annotations[1][1] == QPointF(46, 46)
+    window.canvas.undo()
+    assert len(window.canvas.annotations) == 1
+    window._saved_annotations = list(window.canvas.annotations)
+    window.close()
+
+
+def test_inline_text_copy_paste_in_image_window(qtbot, image_path):
+    window = module.ImageEditorWindow(image_path)
+    qtbot.addWidget(window)
+    window.show()
+    window.canvas._begin_text(QPointF(40, 70))
+    editor = window.canvas.text_editor
+    QTest.keyClicks(editor, "Hello")
+    editor.selectAll()
+    QTest.keyClick(editor, Qt.Key_C, Qt.ControlModifier)
+    QTest.keyClick(editor, Qt.Key_Right)
+    QTest.keyClick(editor, Qt.Key_V, Qt.ControlModifier)
+    assert editor.toPlainText() == "HelloHello"
+    window.canvas._finish_text()
+    window._saved_annotations = list(window.canvas.annotations)
+    window.close()
+
+
+@pytest.mark.parametrize("tool, width_attr, expected", [
+    ("Highlight", "_highlight_width", 20), ("Pixelate", "_pixelate_width", 40),
+])
+def test_brush_scroll_changes_width_without_zooming_image(qtbot, image_path, tool, width_attr, expected):
+    from PySide6.QtGui import QWheelEvent
+    window = module.ImageEditorWindow(image_path)
+    qtbot.addWidget(window)
+    window.canvas._set_tool(tool)
+    event = QWheelEvent(QPointF(60, 90), QPointF(60, 90), QPoint(), QPoint(0, 120),
+                        Qt.NoButton, Qt.ControlModifier, Qt.NoScrollPhase, False)
+    window.scroll.wheelEvent(event)
+    assert getattr(window.canvas, width_attr) == expected
+    assert window.zoom == 1.0
+    window.canvas._set_tool("Select")
+    window.scroll.wheelEvent(event)
+    assert window.zoom > 1.0
+    window.close()
+
+
 def test_window_canvas_saves_original_and_copy_keeps_editor_open(qtbot, image_path):
     window = module.ImageEditorWindow(image_path)
     qtbot.addWidget(window)
