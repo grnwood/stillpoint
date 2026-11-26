@@ -16,7 +16,8 @@ class ScreenRecordingTray(QObject):
         self._owns_tray = False
         self._timer = QTimer(self)
         self._timer.setInterval(1000)
-        self._timer.timeout.connect(self.update)
+        self._timer.timeout.connect(self._blink)
+        self._blink_bright = True
 
     @property
     def available(self):
@@ -44,6 +45,7 @@ class ScreenRecordingTray(QObject):
         self._original_icon = self.tray.icon()
         self._original_tooltip = self.tray.toolTip()
         self._recording_icon = self._colored_icon("#ed3b43")
+        self._dim_recording_icon = self._colored_icon("#75242a")
         self._paused_icon = self._colored_icon("#f5b544", paused=True)
         self.recording_menu = QMenu("Screen recording", self.menu)
         self.pause_action = self.recording_menu.addAction("Pause recording")
@@ -87,6 +89,10 @@ class ScreenRecordingTray(QObject):
         painter.end()
         return QIcon(pixmap)
 
+    def _blink(self):
+        self._blink_bright = not self._blink_bright if self.dialog._state == "recording" else True
+        self.update()
+
     def update(self):
         if self.tray is None:
             return
@@ -94,7 +100,8 @@ class ScreenRecordingTray(QObject):
         active = self.dialog._state == "recording"
         label = "Paused" if paused else "Recording" if active else "Starting recording"
         elapsed = self.dialog.timer_label.text()
-        self.tray.setIcon(self._paused_icon if paused else self._recording_icon)
+        self.tray.setIcon(self._paused_icon if paused else
+                          self._dim_recording_icon if active and not self._blink_bright else self._recording_icon)
         self.tray.setToolTip(f"StillPoint · {label} · {elapsed}")
         self.recording_menu.setTitle(f"{label} · {elapsed}")
         self.pause_action.setText("Resume recording" if paused else "Pause recording")

@@ -301,3 +301,20 @@ def test_global_start_routes_to_last_focused_vault_and_ignores_active_recording(
     assert called == ["first", "second"]
     controller.deleteLater()
     QTest.qWait(1)
+
+
+def test_windows_capture_uses_alt_shift_without_control(qapp, monkeypatch):
+    registered = []
+    user32 = SimpleNamespace(
+        RegisterHotKey=Function(lambda window, identifier, modifiers, key: registered.append((identifier, modifiers, key)) or True),
+        UnregisterHotKey=Function(lambda *args: True),
+    )
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *args, **kwargs: user32, raising=False)
+    backend = hotkeys._WindowsHotkeys(lambda action: None, (("capture", "Alt+Shift+S", "Capture region"),))
+    assert registered == [(0x5353, 0x4005, ord("S"))]
+    backend.close()
+
+
+def test_capture_portal_trigger_preserves_requested_modifiers():
+    assert hotkeys._portal_trigger("Alt+Shift+S") == "ALT+SHIFT+s"
+    assert hotkeys._portal_trigger("Ctrl+Alt+G") == "CTRL+ALT+g"

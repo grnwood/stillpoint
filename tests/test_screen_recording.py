@@ -589,3 +589,64 @@ def test_hotkey_start_uses_current_page_and_starts_only_one_recorder(qtbot, monk
     assert len(started) == 1
     panel._screen_dialog._state = "idle"
     panel._screen_dialog.reject()
+
+
+def test_video_defaults_round_trip_and_apply_to_recorder(qtbot, tmp_path):
+    from sp.app.ui.video_preferences import VideoPreferences
+    first = ScreenRecordDialog(None, "Demo", lambda *args: None)
+    qtbot.addWidget(first)
+    prefs = VideoPreferences(settings=first._bar_settings)
+    qtbot.addWidget(prefs)
+    assert prefs.use_timer.isChecked()
+    assert prefs.countdown.value() == 3
+    prefs.profile.setCurrentIndex(prefs.profile.findData("compact"))
+    prefs.countdown.setValue(7)
+    prefs.save()
+    second = ScreenRecordDialog(None, "Demo", lambda *args: None)
+    qtbot.addWidget(second)
+    assert second.recorder.videoFrameRate() == 24
+    assert (second._max_width, second._max_height) == (1280, 720)
+    second._state = "shortcuts"
+    second._hotkeys_ready()
+    assert second._count == 7
+    second._stop()
+    first.reject()
+    second.reject()
+
+
+def test_countdown_can_be_disabled_after_shortcut_setup(qtbot, monkeypatch):
+    dialog = ScreenRecordDialog(None, "Demo", lambda *args: None)
+    qtbot.addWidget(dialog)
+    dialog._bar_settings.setValue("screenRecording/useCountdown", False)
+    started = []
+    monkeypatch.setattr(dialog, "_start_recording", lambda: started.append(True))
+    dialog._state = "shortcuts"
+    dialog._hotkeys_ready()
+    assert started == [True]
+    assert not dialog._countdown.isActive()
+    dialog._state = "idle"
+    dialog.reject()
+
+
+def test_tray_blinks_only_during_recording(qtbot, monkeypatch):
+    from PySide6.QtWidgets import QApplication
+    monkeypatch.setattr("sp.app.ui.screen_record_tray.QSystemTrayIcon", FakeRecordingTray)
+    monkeypatch.setattr(QApplication.instance(), "_stillpoint_tray_owner", None, raising=False)
+    dialog = ScreenRecordDialog(None, "Demo", lambda *args: None)
+    qtbot.addWidget(dialog)
+    dialog._state = "recording"
+    tray = dialog._tray_controls
+    tray.start()
+    bright = tray.tray.icon().cacheKey()
+    tray._blink()
+    assert tray.tray.icon().cacheKey() != bright
+    tray._blink()
+    assert tray.tray.icon().cacheKey() == bright
+    dialog._state = "paused"
+    tray._blink()
+    paused = tray.tray.icon().cacheKey()
+    tray._blink()
+    assert tray.tray.icon().cacheKey() == paused
+    tray.stop()
+    dialog._state = "idle"
+    dialog.reject()

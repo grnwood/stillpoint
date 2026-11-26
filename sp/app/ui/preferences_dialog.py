@@ -565,6 +565,16 @@ class PreferencesDialog(QDialog):
         self.audio_preferences = AudioPreferences(self)
         audio_layout.addWidget(self.audio_preferences)
 
+        capture_layout = add_section("Screen Capture")
+        from .screen_capture import ScreenCapturePreferences
+        self.screen_capture_preferences = ScreenCapturePreferences(self)
+        capture_layout.addWidget(self.screen_capture_preferences)
+
+        video_layout = add_section("Video / Capture")
+        from .video_preferences import VideoPreferences
+        self.video_preferences = VideoPreferences(self)
+        video_layout.addWidget(self.video_preferences)
+
         # AI Chat
         ai_layout = add_section("AI Chat")
         self.enable_ai_chats_checkbox = QCheckBox("Enable AI Chats")
@@ -1262,7 +1272,10 @@ class PreferencesDialog(QDialog):
     
     def accept(self):
         """Save preferences when OK is clicked."""
+        if not self.screen_capture_preferences.save():
+            return
         self.audio_preferences.save()
+        self.video_preferences.save()
         config.save_toc_widget_enabled(self.toc_widget_checkbox.isChecked())
         config.save_page_editor_toc_widget_enabled(self.page_editor_toc_widget_checkbox.isChecked())
         config.save_vi_mode_enabled(self.vi_enable_checkbox.isChecked())

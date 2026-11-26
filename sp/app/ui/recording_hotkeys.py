@@ -19,6 +19,23 @@ PORTAL_APP_ID = "app.stillpoint.StillPoint"
 DEFAULT_DESCRIPTION = "Ctrl+Alt+Shift+P: pause/resume · Ctrl+Alt+Shift+S: stop/review"
 
 
+def _binding_key(sequence):
+    """Legacy letter bindings retain the recording modifier chord."""
+    parts = sequence.split("+")
+    if len(parts) == 1:
+        return {"CTRL", "ALT", "SHIFT"}, sequence
+    return {part.upper() for part in parts[:-1]}, parts[-1]
+
+
+def _binding_description(sequence):
+    return sequence if "+" in sequence else f"Ctrl+Alt+Shift+{sequence}"
+
+
+def _portal_trigger(sequence):
+    parts = _binding_description(sequence).split("+")
+    return "+".join([part.upper() for part in parts[:-1]] + [parts[-1].lower()])
+
+
 class RecordingHotkeys(QObject):
     activated = Signal(str)
     ready = Signal()
@@ -56,7 +73,7 @@ class RecordingHotkeys(QObject):
             else:
                 raise RuntimeError("this desktop has no supported global-shortcut backend")
             labels = {"start": "start recording", "pause": "pause/resume", "stop": "stop/review"}
-            description = " · ".join(f"Ctrl+Alt+Shift+{key}: {labels[action]}" for action, key, _ in self._bindings)
+            description = " · ".join(f"{_binding_description(key)}: {labels.get(action, action)}" for action, key, _ in self._bindings)
             self._registered(description.replace("Ctrl+Alt", "Control+Option") if sys.platform == "darwin" else description)
         except Exception as exc:
             self.close()
@@ -106,7 +123,10 @@ class _X11Hotkeys:
             ignored = {0, X.LockMask, numlock_mask, X.LockMask | numlock_mask}
             modifiers = X.ControlMask | X.Mod1Mask | X.ShiftMask
             for action, key, _description in bindings:
-                code = self._display.keysym_to_keycode(XK.string_to_keysym(key.lower()))
+                mods, letter = _binding_key(key)
+                modifiers = sum(mask for name, mask in (("CTRL", X.ControlMask), ("ALT", X.Mod1Mask),
+                                                        ("SHIFT", X.ShiftMask), ("META", X.Mod4Mask)) if name in mods)
+                code = self._display.keysym_to_keycode(XK.string_to_keysym(letter.lower()))
                 if not code:
                     raise RuntimeError(f"cannot find the {key} key on this keyboard")
                 self._keys[code] = action
@@ -116,7 +136,7 @@ class _X11Hotkeys:
                     self._root.grab_key(code, mask, False, X.GrabModeAsync, X.GrabModeAsync, onerror=caught)
                     self._display.sync()
                     if caught.get_error() is not None:
-                        raise RuntimeError(f"Ctrl+Alt+Shift+{key} is already in use")
+                        raise RuntimeError(f"{_binding_description(key)} is already in use")
                     self._grabs.append((code, mask))
             self._notifier = QSocketNotifier(self._display.fileno(), QSocketNotifier.Read, parent)
             self._notifier.activated.connect(self._events)
@@ -170,9 +190,12 @@ class _WindowsHotkeys(QAbstractNativeEventFilter):
         self._installed = False
         try:
             for action, key, _ in bindings:
-                identifier = {"pause": 0x5350, "stop": 0x5351, "start": 0x5352}[action]
-                if not self._user32.RegisterHotKey(None, identifier, 0x4000 | 0x1 | 0x2 | 0x4, ord(key)):
-                    raise RuntimeError(f"Ctrl+Alt+Shift+{key} could not be registered (error {ctypes.get_last_error()})")
+                identifier = {"pause": 0x5350, "stop": 0x5351, "start": 0x5352, "capture": 0x5353}[action]
+                mods, letter = _binding_key(key)
+                modifiers = sum(mask for name, mask in (("CTRL", 2), ("ALT", 1), ("SHIFT", 4), ("META", 8)) if name in mods)
+                vk = ord(letter.upper()) if len(letter) == 1 else 0
+                if not vk or not self._user32.RegisterHotKey(None, identifier, 0x4000 | modifiers, vk):
+                    raise RuntimeError(f"{_binding_description(key)} could not be registered (error {ctypes.get_last_error()})")
                 self._ids[identifier] = action
             QCoreApplication.instance().installNativeEventFilter(self)
             self._installed = True
@@ -240,12 +263,24 @@ class _MacHotkeys:
                 raise RuntimeError(f"could not install macOS hotkey handler ({result})")
             # Carbon uses the physical Control key, not Qt's Command mapping.
             for action, key, _ in bindings:
-                identifier, keycode = {"pause": (1, 35), "stop": (2, 1), "start": (3, 15)}[action]  # ANSI P / S / R
+                identifier = {"pause": 1, "stop": 2, "start": 3, "capture": 4}[action]
+                mods, letter = _binding_key(key)
+                codes = {"A": 0, "S": 1, "D": 2, "F": 3, "H": 4, "G": 5,
+                         "Z": 6, "X": 7, "C": 8, "V": 9, "B": 11, "Q": 12,
+                         "W": 13, "E": 14, "R": 15, "Y": 16, "T": 17,
+                         "1": 18, "2": 19, "3": 20, "4": 21, "6": 22, "5": 23,
+                         "9": 25, "7": 26, "8": 28, "0": 29, "O": 31,
+                         "U": 32, "I": 34, "P": 35, "L": 37, "J": 38,
+                         "K": 40, "N": 45, "M": 46}
+                keycode = codes.get(letter.upper())
+                if keycode is None:
+                    raise RuntimeError("Unsupported capture shortcut key")
+                modifiers = sum(mask for name, mask in (("CTRL", 4096), ("ALT", 2048), ("SHIFT", 512), ("META", 256)) if name in mods)
                 ref = pointer()
-                result = carbon.RegisterEventHotKey(keycode, 4096 | 2048 | 512,
+                result = carbon.RegisterEventHotKey(keycode, modifiers,
                     _HotkeyID(int.from_bytes(b"StPr", "big"), identifier), target, 0, ctypes.byref(ref))
                 if result:
-                    raise RuntimeError(f"Control+Option+Shift+{key} is unavailable ({result})")
+                    raise RuntimeError(f"{_binding_description(key)} is unavailable ({result})")
                 self._refs.append(ref)
                 self._ids.add(identifier)
         except Exception:
@@ -262,7 +297,7 @@ class _MacHotkeys:
                 self._held.discard(identifier.id)
             elif identifier.id not in self._held:
                 self._held.add(identifier.id)
-                self._callback({1: "pause", 2: "stop", 3: "start"}.get(identifier.id, ""))
+                self._callback({1: "pause", 2: "stop", 3: "start", 4: "capture"}.get(identifier.id, ""))
             return 0
         return -9874  # eventNotHandledErr
 
@@ -327,7 +362,7 @@ class _PortalHotkeys(QThread):
                 "handle_token": Variant("s", token), "session_handle_token": Variant("s", token)}])
             self._session = result["session_handle"].value
             shortcuts = [[action, {"description": Variant("s", description),
-                          "preferred_trigger": Variant("s", f"CTRL+ALT+SHIFT+{key.lower()}")}]
+                          "preferred_trigger": Variant("s", _portal_trigger(key))}]
                          for action, key, description in self._bindings]
             result = await self._request("BindShortcuts", "oa(sa{sv})sa{sv}",
                 [self._session, shortcuts, "", {"handle_token": Variant("s", "bind_" + uuid.uuid4().hex)}])

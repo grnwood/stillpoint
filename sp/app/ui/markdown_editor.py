@@ -1647,6 +1647,7 @@ class MarkdownEditor(QTextEdit):
             return f"[:{colon_path}|{label}]"
         # Replace +CamelCase only if not in the label part of a [link|label]
         return re.sub(r'(?<!\S)\+(?P<link>[A-Za-z][\w]*)(?=\s|$)', replacer, text)
+    imageEdited = Signal(str)
     imageSaved = Signal(str)
     focusLost = Signal()
     cursorMoved = Signal(int)
@@ -7006,7 +7007,7 @@ class MarkdownEditor(QTextEdit):
             original = fmt.property(IMAGE_PROP_ORIGINAL) or fmt.name()
             resolved = self._resolve_image_path(str(original))
             if resolved and resolved.exists():
-                open_path_in_system(resolved)
+                self._open_image_editor(resolved, str(original))
             return
         
         # Check if double-clicking on a checkbox and toggle it
@@ -7022,6 +7023,21 @@ class MarkdownEditor(QTextEdit):
             self._activate_link(link)
             return
         super().mouseDoubleClickEvent(event)
+
+    def _open_image_editor(self, resolved, original):
+        from .image_editor_window import open_image_editor, remote_image_saver
+        callback = None
+        if self._remote_mode:
+            virtual_path = self._virtual_image_path(original)
+            if not virtual_path or self._http_client is None:
+                return
+            # The image may be linked from another page's attachment directory.
+            page_path = self._current_path
+            if not page_path or Path(page_path).parent != Path(virtual_path).parent:
+                page_path = str(Path(virtual_path).parent / "_image_edit.md")
+            callback = remote_image_saver(self._http_client, virtual_path, page_path, self._auth_prompt)
+        open_image_editor(resolved, self, read_only=self._read_only_mode,
+                          save_callback=callback, on_saved=self.imageEdited.emit)
 
     def _toggle_task_at_cursor(self, pos=None) -> bool:
         cursor = self.cursorForPosition(pos) if pos is not None else self.textCursor()

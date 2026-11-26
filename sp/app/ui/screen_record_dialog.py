@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from .audio_window import AudioWindow
 from .voice_note_dialog import _SaveVoiceNote
+from .video_preferences import RECORDING_PROFILES, countdown_seconds
 from .screen_record_tray import ScreenRecordingTray
 from .recording_hotkeys import RecordingHotkeys
 from sp.app.macos_permissions import microphone_usage_description
@@ -93,7 +94,10 @@ class ScreenRecordDialog(AudioWindow):
         self.recorder = QMediaRecorder(self)
         self.session.setRecorder(self.recorder)
         self.recorder.setQuality(QMediaRecorder.HighQuality)
-        self.recorder.setVideoFrameRate(30)
+        profile = RECORDING_PROFILES.get(self._bar_settings.value("screenRecording/profile", "standard"),
+                                         RECORDING_PROFILES["standard"])
+        _, self._max_width, self._max_height, frame_rate = profile
+        self.recorder.setVideoFrameRate(frame_rate)
         if self._format is not None:
             self.recorder.setMediaFormat(self._format)
         self.recorder.recorderStateChanged.connect(self._recorder_state_changed)
@@ -389,11 +393,14 @@ class ScreenRecordDialog(AudioWindow):
         if "unavailable" in self._hotkeys.status.lower():
             self._show_error(self._hotkeys.status)
         self._state = "countdown"
-        self._count = 3
+        if not self._bar_settings.value("screenRecording/useCountdown", True, type=bool):
+            self._start_recording()
+            return
+        self._count = countdown_seconds(self._bar_settings)
         self.video.hide()
         self.countdown_label.show()
         self._show_countdown_number()
-        self.status.setText("Recording starts in 3…")
+        self.status.setText(f"Recording starts in {self._count}…")
         self._update_controls()
         self._countdown.start()
 
@@ -443,7 +450,7 @@ class ScreenRecordDialog(AudioWindow):
                 self.session.setAudioInput(self.audio_input)
             selected_screen = self.capture.screen()
             if selected_screen is not None:
-                self.recorder.setVideoResolution(selected_screen.size().scaled(1920, 1080, Qt.KeepAspectRatio))
+                self.recorder.setVideoResolution(selected_screen.size().scaled(self._max_width, self._max_height, Qt.KeepAspectRatio))
             self.recorder.setOutputLocation(QUrl.fromLocalFile(str(self._path)))
             self._recorded_ms = 0
             self._recording_clock.invalidate()

@@ -275,6 +275,14 @@ class AttachmentsPanel(QWidget):
         self.record_button.clicked.connect(self._record_voice_note)
         toolbar.addWidget(self.record_button)
 
+        self.screenshot_button = QToolButton()
+        self._set_toolbar_icon(self.screenshot_button, "screenshot.svg")
+        self.screenshot_button.setToolTip("Capture and annotate a screen region")
+        self.screenshot_button.setAccessibleName("Capture screen region")
+        self.screenshot_button.setEnabled(False)
+        self.screenshot_button.clicked.connect(self._capture_screen)
+        toolbar.addWidget(self.screenshot_button)
+
         self.screen_record_button = QToolButton()
         self._set_toolbar_icon(self.screen_record_button, "video-record.svg", QColor("#e53935"))
         self.screen_record_button.setToolTip("Record screen")
@@ -453,6 +461,7 @@ class AttachmentsPanel(QWidget):
         """Refresh the list of attachments for the current page."""
         t0 = time.perf_counter()
         self.record_button.setEnabled(False)
+        self.screenshot_button.setEnabled(False)
         self.screen_record_button.setEnabled(False)
         self.attachments_list.clear()
         self.empty_label.setText("No attachments.")
@@ -491,6 +500,7 @@ class AttachmentsPanel(QWidget):
         self.refresh_button.setEnabled(True)
         self.add_button.setEnabled(True)
         self.record_button.setEnabled(True)
+        self.screenshot_button.setEnabled(True)
         self.screen_record_button.setEnabled(True)
         
         # Update view mode based on zoom level
@@ -559,6 +569,7 @@ class AttachmentsPanel(QWidget):
         self.refresh_button.setEnabled(True)
         self.add_button.setEnabled(True)
         self.record_button.setEnabled(True)
+        self.screenshot_button.setEnabled(True)
         self.screen_record_button.setEnabled(False)
         self._update_view_mode()
         try:
@@ -786,6 +797,7 @@ class AttachmentsPanel(QWidget):
             self._update_thumbnails_icon()
             self._set_toolbar_icon(self.record_button, "microphone.svg", QColor("#e53935"))
             self._set_toolbar_icon(self.screen_record_button, "video-record.svg", QColor("#e53935"))
+            self._set_toolbar_icon(self.screenshot_button, "screenshot.svg")
 
     def _get_remote_cache_root(self) -> Optional[Path]:
         if not self._api_base:
@@ -828,6 +840,59 @@ class AttachmentsPanel(QWidget):
                 if attachment_path:
                     names.add(Path(str(attachment_path)).name)
         return names
+
+    def _capture_screen(self):
+        from .screen_capture import start_capture
+        existing = getattr(self, "_capture_overlay", None)
+        if existing is not None:
+            existing.raise_()
+            existing.activateWindow()
+            return
+        page = self.current_page_path
+        remote = self._remote_mode
+        client = self._http_client
+        page_key = self._current_page_key()
+
+        def save_image(image):
+            from datetime import datetime
+            import uuid
+            filename = f"capture-{datetime.now():%Y-%m-%d_%H-%M-%S}-{uuid.uuid4().hex[:8]}.png"
+            from PySide6.QtCore import QBuffer, QIODevice
+            buffer = QBuffer()
+            buffer.open(QIODevice.WriteOnly)
+            if not image.save(buffer, "PNG"):
+                raise OSError("Could not encode the screenshot.")
+            if remote:
+                response = client.post("/files/attach", data={"page_path": page_key},
+                                       files={"files": (filename, bytes(buffer.data()), "image/png")})
+                response.raise_for_status()
+            else:
+                if not page.is_file():
+                    raise OSError("The destination page no longer exists.")
+                destination = page.parent / filename
+                output = destination.open("xb")
+                try:
+                    with output:
+                        output.write(bytes(buffer.data()))
+                except OSError:
+                    destination.unlink(missing_ok=True)
+                    raise
+            if self.current_page_path == page and self._remote_mode == remote:
+                self._refresh_attachments()
+            if not remote:
+                self.attachmentsModified.emit("screen capture saved")
+            return filename
+
+        # Bind the page and connection now; clipboard capture works without a page.
+        writable = page is not None and (not remote or (client is not None and page_key))
+        owner = self.window()
+        check = getattr(owner, "_ensure_writable", None)
+        if writable and check is not None:
+            writable = check("save a screen capture", interactive=False)
+        def opened(overlay):
+            self._capture_overlay = overlay
+            overlay.destroyed.connect(lambda: setattr(self, "_capture_overlay", None))
+        start_capture(self, save_image if writable else None, opened)
 
     def _record_voice_note(self) -> None:
         self._record_attachment("voice")
@@ -1228,10 +1293,63 @@ class AttachmentsPanel(QWidget):
             self.zoom_level -= 1
             self._refresh_attachments()
     
+    def _image_attachment_path(self, item):
+        """Materialize a remote image for editing or the native viewer."""
+        path = _item_path(item)
+        if not path:
+            return None
+        if not self._remote_mode:
+            return Path(path)
+        data = item.data(Qt.UserRole)
+        if not isinstance(data, dict) or self._http_client is None:
+            return None
+        root = self._get_remote_cache_root()
+        if root is None:
+            return None
+        cached = Path(data["cache_path"]) if data.get("cache_path") else root / "attachments" / path.lstrip("/")
+        response = self._http_client.get("/api/file/raw", params={"path": path})
+        if response.status_code == 401 and self._auth_prompt and self._auth_prompt():
+            response = self._http_client.get("/api/file/raw", params={"path": path})
+        response.raise_for_status()
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        cached.write_bytes(response.content)
+        return cached
+
+    def _open_image_attachment(self, item):
+        from .image_editor_window import open_image_editor, remote_image_saver
+        try:
+            path = self._image_attachment_path(item)
+            if path is None:
+                return
+            remote = self._remote_mode
+            owner = self.window()
+            check = getattr(owner, "_ensure_writable", None)
+            read_only = not check("edit an image", interactive=False) if check else False
+            callback = (remote_image_saver(self._http_client, _item_path(item), self._current_page_key(), self._auth_prompt)
+                        if remote else None)
+            def saved(filename):
+                self._refresh_attachments()
+                if not remote:
+                    self.attachmentsModified.emit("image edited")
+            return open_image_editor(path, self, read_only=read_only, save_callback=callback, on_saved=saved)
+        except (OSError, httpx.HTTPError) as exc:
+            QMessageBox.warning(self, "Could not open image", str(exc))
+
+    def _open_in_default_viewer(self, item):
+        try:
+            path = self._image_attachment_path(item)
+            if path is not None:
+                open_path_in_system(path)
+        except (OSError, httpx.HTTPError) as exc:
+            QMessageBox.warning(self, "Could not open image", str(exc))
+
     def _open_attachment(self, item) -> None:
-        """Open diagrams in editors, audio in the player, and other files externally."""
+        """Open supported media in Stillpoint and other files externally."""
         data = item.data(Qt.UserRole)
         path = _item_path(item)
+        if path and Path(path).suffix.lower() in _ATTACHMENT_TYPES["Images"]:
+            self._open_image_attachment(item)
+            return
         if path and Path(path).suffix.lower() in _ATTACHMENT_TYPES["Audio"]:
             self._play_audio_attachment(path)
             return
@@ -1321,8 +1439,19 @@ class AttachmentsPanel(QWidget):
         """Handle right-click context menu on attachments list."""
         menu = QMenu(self)
         apply_menu_theme(menu, self.attachments_list)
+        clicked = self.attachments_list.itemAt(pos)
+        if clicked is not None and _item_path(clicked) and not clicked.isSelected():
+            self.attachments_list.clearSelection()
+            clicked.setSelected(True)
         selected = self.attachments_list.selectedItems()
-        
+        if len(selected) == 1 and Path(_item_path(selected[0]) or "").suffix.lower() in _ATTACHMENT_TYPES["Images"]:
+            item = selected[0]
+            edit_action = menu.addAction("Edit image")
+            edit_action.triggered.connect(lambda: self._open_image_attachment(item))
+            viewer_action = menu.addAction("Open in default viewer")
+            viewer_action.triggered.connect(lambda: self._open_in_default_viewer(item))
+            menu.addSeparator()
+
         # Add "Add new PlantUML..." action
         add_plantuml_action = menu.addAction("Add new PlantUML...")
         add_plantuml_action.triggered.connect(self._create_new_plantuml)

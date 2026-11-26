@@ -2803,6 +2803,7 @@ class MainWindow(QMainWindow):
             lambda message, timeout_ms: self.statusBar().showMessage(message, timeout_ms)
         )
         self.editor.imageSaved.connect(self._on_image_saved)
+        self.editor.imageEdited.connect(self._on_image_edited)
         self.editor.set_task_hover_edit_enabled(True)
         self.editor.taskEditRequested.connect(self._edit_task_from_main_editor)
         self.editor.task_context_menu_provider = self._main_editor_task_context_menu
@@ -3702,6 +3703,10 @@ class MainWindow(QMainWindow):
 
         file_menu.addAction(self._record_voice_note_action)
         file_menu.addAction(self._record_screen_action)
+        file_menu.addAction(self._capture_region_action)
+        self._capture_screen_action = QAction("Capture Screen", self)
+        self._capture_screen_action.triggered.connect(self._capture_screen)
+        file_menu.addAction(self._capture_screen_action)
 
         insert_link_action = QAction("Insert Link…", self)
         insert_link_action.setToolTip("Insert a link to another page (Ctrl+L)")
@@ -3759,6 +3764,7 @@ class MainWindow(QMainWindow):
         self._setup_quick_capture_shortcut(show_error=False)
         from .recording_hotkeys import register_recording_start_shortcut
         register_recording_start_shortcut(self)
+        self._setup_screen_capture_shortcut()
         self._focus_recent = ["editor", "tree", "left", "right"]
         self._focus_stylesheet_cache: dict[str, str] = {}
         self._app_focus_changed_slot = None
@@ -4301,6 +4307,13 @@ class MainWindow(QMainWindow):
         if video_icon:
             self._record_screen_action.setIcon(video_icon)
         self.toolbar.addAction(self._record_screen_action)
+        self._capture_region_action = QAction("Capture Region", self)
+        self._capture_region_action.setToolTip("Capture and annotate a screen region")
+        self._capture_region_action.triggered.connect(self._capture_screen)
+        screenshot_icon = self._load_icon(self._find_asset("screenshot.svg"), icon_color, size=18)
+        if screenshot_icon:
+            self._capture_region_action.setIcon(screenshot_icon)
+        self.toolbar.addAction(self._capture_region_action)
 
         # Add bookmark display area with horizontal scroll controls
         self.bookmark_strip = QWidget()
@@ -12164,6 +12177,7 @@ class MainWindow(QMainWindow):
             ("_toolbar_print_action", "print.svg", 18),
             ("_record_voice_note_action", "microphone.svg", 18),
             ("_record_screen_action", "video-record.svg", 18),
+            ("_capture_region_action", "screenshot.svg", 18),
             ("_attachment_indicator", "attachment-paperclip.svg", 18),
             ("_toolbar_prefs_action", "cog.svg", 18),
         ):
@@ -16780,6 +16794,12 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
 
+    def _on_image_edited(self, filename: str) -> None:
+        self.statusBar().showMessage(f"Image saved: {Path(filename).name}", 5000)
+        self.right_panel.refresh_attachments()
+        if not self._remote_mode:
+            self._on_local_attachment_changed("image edited")
+
     def _on_image_saved(self, filename: str) -> None:
         self.statusBar().showMessage(f"Image pasted as {filename}", 5000)
         # Refresh attachments panel to show the new image
@@ -18142,6 +18162,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 self.update_links_on_index = True
             self._setup_quick_capture_shortcut(show_error=True)
+            self._setup_screen_capture_shortcut()
             self._update_periodic_search_sync_timer()
         try:
             self.editor.set_pygments_style(config.load_pygments_style("monokai"))
@@ -22597,6 +22618,19 @@ class MainWindow(QMainWindow):
             return
         self._focus_attachments_tab()
         self.right_panel.attachments_panel._record_screen(auto_start=True)
+
+    def _setup_screen_capture_shortcut(self):
+        from .screen_capture_hotkeys import register_capture_shortcut
+        register_capture_shortcut(self)
+
+    def _capture_screen(self):
+        panel = self.right_panel.attachments_panel
+        # Hidden attachments are refreshed lazily and may still point at a
+        # previous page. Bind capture to the active editor before taking it.
+        page = Path(self.vault_root) / self.current_path.lstrip("/") if self.vault_root and self.current_path else None
+        if panel.current_page_path != page:
+            panel.set_page(page)
+        panel._capture_screen()
 
     def _record_screen(self) -> None:
         if self._remote_mode:
