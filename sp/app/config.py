@@ -2805,6 +2805,27 @@ def load_homebase_device_id() -> str:
     return created
 
 
+def load_audio_settings() -> dict:
+    """Machine-wide audio defaults; device IDs are Qt byte IDs encoded as hex."""
+    payload = _read_global_config().get("audio", {})
+    if not isinstance(payload, dict):
+        payload = {}
+    settings = {key: str(payload.get(key) or "").strip() for key in (
+        "microphone_id", "microphone_name", "transcription_server", "transcription_model")}
+    settings["recording_format"] = payload.get("recording_format") if payload.get("recording_format") in (".wav", ".m4a") else ".m4a"
+    settings["transcription_path"] = str(payload.get("transcription_path") or "/v1/audio/transcriptions").strip()
+    try:
+        settings["playback_volume"] = max(0, min(100, int(payload.get("playback_volume", 75))))
+    except (ValueError, TypeError):
+        settings["playback_volume"] = 75
+    return settings
+
+
+def save_audio_settings(settings: dict) -> None:
+    """Merge audio changes so choosing a microphone preserves other defaults."""
+    _update_global_config({"audio": {**load_audio_settings(), **settings}})
+
+
 def load_default_ai_server() -> Optional[str]:
     """Load preferred default AI server for new chats."""
     payload = _read_global_config()

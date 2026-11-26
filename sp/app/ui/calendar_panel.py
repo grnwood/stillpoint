@@ -42,6 +42,9 @@ from PySide6.QtWidgets import (
     QStyleOptionViewItem,
     QDialog,
     QComboBox,
+    QSpinBox,
+    QDialogButtonBox,
+    QLayout,
 )
 from PySide6.QtCore import QSize
 from PySide6.QtSvg import QSvgRenderer
@@ -185,10 +188,43 @@ class MultiSelectCalendarDelegate(QStyledItemDelegate):
         else:
             # Use default painting
             super().paint(painter, option, index)
+            if date_val == QDate.currentDate():
+                painter.save()
+                painter.setRenderHint(QPainter.Antialiasing)
+                painter.setPen(self.highlight_color)
+                painter.setBrush(Qt.NoBrush)
+                painter.drawRoundedRect(option.rect.adjusted(3, 3, -3, -3), 5, 5)
+                painter.setPen(self.calendar_widget.palette().color(QPalette.Text))
+                painter.drawText(option.rect, Qt.AlignCenter, str(index.data(Qt.DisplayRole)))
+                painter.restore()
 
 
 class InsightDragList(QListWidget):
     """QListWidget that drags page paths into the editor."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.empty_label = QLabel(self.viewport())
+        self.empty_label.setWordWrap(True)
+        self.empty_label.setAlignment(Qt.AlignCenter)
+        self.empty_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.empty_label.setForegroundRole(QPalette.PlaceholderText)
+        for signal in (self.model().rowsInserted, self.model().rowsRemoved, self.model().modelReset):
+            signal.connect(self._update_empty_state)
+
+    def set_empty_text(self, text):
+        self.empty_label.setText(text)
+        self._update_empty_state()
+
+    def _update_empty_state(self, *_):
+        if not Shiboken.isValid(self) or not Shiboken.isValid(self.empty_label):
+            return
+        self.empty_label.setVisible(self.count() == 0)
+        self.empty_label.setGeometry(self.viewport().rect().adjusted(12, 8, -12, -8))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_empty_state()
 
     def startDrag(self, supportedActions):  # type: ignore[override]
         item = self.currentItem()
@@ -468,8 +504,8 @@ class CalendarPanel(QWidget):
 
         self._show_three_calendars = False
         self._syncing_calendars = False
-        self._hide_insights_tabs = False
-        self._main_splitter_sizes_before_hide: Optional[list[int]] = None
+        self._compact_insights_layout = True
+        self._wide_insight_sizes: Optional[list[int]] = None
 
         self._attach_calendar_view()
         self.day_insights = QWidget()
@@ -478,15 +514,7 @@ class CalendarPanel(QWidget):
         self.day_insights_layout.setContentsMargins(8, 8, 8, 8)
         self.day_insights_layout.setSpacing(6)
         self.insight_title = QLabel("No date selected")
-        self.insight_title.setStyleSheet(
-            "font-weight: "
-            f"{theme_value('calendar_panel.insight_title.weight', 'bold')}; "
-            "background:"
-            f"{theme_value('calendar_panel.insight_title.bg', '#30475e')}; "
-            "color:"
-            f"{theme_value('calendar_panel.insight_title.text', '#ffffff')}; "
-            "padding:4px 8px; border-radius:4px;"
-        )
+        self.insight_title.setStyleSheet("font-weight: 600; padding: 4px 2px;")
         # Title row with an optional Clear button when multiple days are selected
         title_row = QHBoxLayout()
         title_row.setContentsMargins(0, 0, 0, 0)
@@ -509,6 +537,7 @@ class CalendarPanel(QWidget):
         title_row.addWidget(self.filter_btn)
         self.insight_counts = QLabel("")
         self.insight_tags = QLabel("")
+        self.insight_tags.hide()
         # Keep the date label on one line; allow counts and tags to wrap if needed.
         self.insight_title.setWordWrap(False)
         for lbl in (self.insight_counts, self.insight_tags):
@@ -538,6 +567,7 @@ class CalendarPanel(QWidget):
         self.day_insights_layout.addWidget(self.insight_tags)
 
         self.subpage_list = InsightDragList()
+        self.subpage_list.set_empty_text("No additional journal pages for this day.")
         self.subpage_list.itemActivated.connect(self._open_insight_link)
         self.subpage_list.itemClicked.connect(self._open_insight_link)
         self.subpage_list.installEventFilter(self)
@@ -554,10 +584,13 @@ class CalendarPanel(QWidget):
         try:
             self.subpage_list.setWordWrap(False)
             self.subpage_list.setUniformItemSizes(True)
+            self.subpage_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            self.subpage_list.setTextElideMode(Qt.ElideRight)
         except Exception:
             pass
 
         self.headings_list = InsightDragList()
+        self.headings_list.set_empty_text("No headings in this journal entry.")
         self.headings_list.itemActivated.connect(self._open_insight_link)
         self.headings_list.itemClicked.connect(self._open_insight_link)
         self.headings_list.installEventFilter(self)
@@ -573,6 +606,8 @@ class CalendarPanel(QWidget):
         try:
             self.headings_list.setWordWrap(False)
             self.headings_list.setUniformItemSizes(True)
+            self.headings_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            self.headings_list.setTextElideMode(Qt.ElideRight)
         except Exception:
             pass
         # Pages and headings: split into two columns (Headings | Sub Pages)
@@ -586,7 +621,7 @@ class CalendarPanel(QWidget):
         headings_col_layout = QVBoxLayout()
         headings_col_layout.setContentsMargins(0, 0, 0, 0)
         headings_col_layout.setSpacing(4)
-        headings_label = QLabel("Headings:")
+        headings_label = QLabel("Journal headings")
         self._headings_label = headings_label
         headings_label.setStyleSheet("font-weight: bold;")
         headings_col_layout.addWidget(headings_label)
@@ -598,7 +633,7 @@ class CalendarPanel(QWidget):
         subpages_col_layout = QVBoxLayout()
         subpages_col_layout.setContentsMargins(0, 0, 0, 0)
         subpages_col_layout.setSpacing(4)
-        subpages_label = QLabel("Journal Pages:")
+        subpages_label = QLabel("Journal pages")
         self._subpages_label = subpages_label
         subpages_label.setStyleSheet("font-weight: bold;")
         subpages_col_layout.addWidget(subpages_label)
@@ -611,6 +646,11 @@ class CalendarPanel(QWidget):
         print_row = QHBoxLayout()
         print_row.setContentsMargins(0, 0, 0, 0)
         print_row.setSpacing(6)
+        self.open_journal_button = QToolButton()
+        self.open_journal_button.setText("Open journal")
+        self.open_journal_button.setToolTip("Open or create the selected day's journal entry")
+        self.open_journal_button.clicked.connect(self._open_selected_journal)
+        print_row.addWidget(self.open_journal_button)
         print_row.addStretch(1)
         self._print_btn = QToolButton()
         self._print_btn.setToolTip("Print calendar view to browser")
@@ -655,12 +695,12 @@ class CalendarPanel(QWidget):
         self.tasks_due_list.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.tasks_due_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.tasks_due_list.setAlternatingRowColors(True)
-        self.tasks_due_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.tasks_due_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.tasks_due_list.itemActivated.connect(self._open_task_item)
         self.tasks_due_list.itemDoubleClicked.connect(self._open_task_item)
         self.tasks_due_list.itemClicked.connect(self._on_task_item_clicked)
         self.tasks_due_list.setSortingEnabled(True)
-        self.tasks_due_list.setColumnWidth(0, 70)
+        self.tasks_due_list.setColumnWidth(0, 48)
         self.tasks_due_list.setColumnWidth(2, 90)
         header = self.tasks_due_list.header()
         header.setSortIndicatorShown(True)
@@ -668,7 +708,7 @@ class CalendarPanel(QWidget):
         try:
             from PySide6.QtWidgets import QHeaderView
             header.setSectionResizeMode(0, QHeaderView.Interactive)
-            header.setSectionResizeMode(1, QHeaderView.Interactive)
+            header.setSectionResizeMode(1, QHeaderView.Stretch)
             header.setSectionResizeMode(2, QHeaderView.Interactive)
         except Exception:
             pass
@@ -676,6 +716,7 @@ class CalendarPanel(QWidget):
         if saved_header:
             try:
                 self.tasks_due_list.header().restoreState(QByteArray.fromBase64(saved_header.encode("ascii")))
+                self.tasks_due_list.header().setSectionResizeMode(1, QHeaderView.Stretch)
             except Exception:
                 pass
         self.tasks_due_list.header().sectionMoved.connect(lambda *_: self._header_save_timer.start())
@@ -803,6 +844,7 @@ class CalendarPanel(QWidget):
         self.activity_panel = self._build_activity_panel()
         self.ai_insights_panel: QWidget | None = self._build_ai_summary_panel() if self._ai_enabled else None
         self.journal_tabs = QTabWidget()
+        self.journal_tabs.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         self.journal_tabs.addTab(tasks_panel, "Tasks")
         self.journal_tabs.addTab(self.activity_panel, "Activity")
         if self.ai_insights_panel:
@@ -850,9 +892,40 @@ class CalendarPanel(QWidget):
         zoom_row.addWidget(self.zoom_out_btn)
         zoom_row.addWidget(self.zoom_in_btn)
         cal_layout.addLayout(zoom_row)
+        navigation = QHBoxLayout()
+        self.previous_month_button = QToolButton()
+        self.previous_month_button.setText("‹")
+        self.previous_month_button.setToolTip("Previous month")
+        self.previous_month_button.setAccessibleName("Previous month")
+        self.previous_month_button.setMinimumSize(28, 28)
+        self.previous_month_button.clicked.connect(self.calendar.showPreviousMonth)
+        self.next_month_button = QToolButton()
+        self.next_month_button.setText("›")
+        self.next_month_button.setToolTip("Next month")
+        self.next_month_button.setAccessibleName("Next month")
+        self.next_month_button.setMinimumSize(28, 28)
+        self.next_month_button.clicked.connect(self.calendar.showNextMonth)
+        self.month_title = QToolButton()
+        self.month_title.setText(QDate(self.calendar.yearShown(), self.calendar.monthShown(), 1).toString("MMMM yyyy"))
+        self.month_title.setAutoRaise(True)
+        self.month_title.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.month_title.setToolTip("Choose month and year")
+        self.month_title.setAccessibleName("Choose month and year")
+        self.month_title.clicked.connect(self._choose_month)
+        self.month_title.setStyleSheet("font-weight: 600; padding: 6px;")
+        navigation.addWidget(self.previous_month_button)
+        navigation.addWidget(self.month_title, 1)
+        navigation.addWidget(self.next_month_button)
+        cal_layout.addLayout(navigation)
+        self.calendar.setNavigationBarVisible(False)
+        self.calendar.setGridVisible(False)
+        self.prev_calendar.setGridVisible(False)
+        self.next_calendar.setGridVisible(False)
         self.calendar_row = QWidget()
+        self.calendar_row.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.calendar_row.installEventFilter(self)
         self.calendar_row_layout = QHBoxLayout(self.calendar_row)
+        self.calendar_row_layout.setSizeConstraint(QLayout.SetNoConstraint)
         self.calendar_row_layout.setContentsMargins(0, 0, 0, 0)
         self.calendar_row_layout.setSpacing(8)
         self.calendar_row_layout.addWidget(self.prev_calendar_container)
@@ -862,7 +935,7 @@ class CalendarPanel(QWidget):
         cal_container.setLayout(cal_layout)
 
         # Horizontal splitter between insights and task/ai tabs (bottom row)
-        self.main_splitter = QSplitter(Qt.Horizontal)
+        self.main_splitter = QSplitter(Qt.Vertical)
         self.main_splitter.addWidget(self.day_insights)
         self.main_splitter.addWidget(self.journal_tabs)
         self.main_splitter.setStretchFactor(0, 0)
@@ -895,6 +968,7 @@ class CalendarPanel(QWidget):
         root_layout.setSpacing(0)
         root_layout.addWidget(self.top_splitter)
         self.setLayout(root_layout)
+        self._apply_insight_list_styles()
         install_primary_wheel_zoom(self, self.adjust_font_size)
 
         self.vault_root: Optional[str] = None
@@ -963,7 +1037,7 @@ class CalendarPanel(QWidget):
                     border-radius: 6px;
                 }}
                 QListWidget::item {{
-                    padding: 2px 4px;
+                    padding: 6px 8px;
                     background: {base_bg};
                     border: 1px solid transparent;
                     border-radius: 6px;
@@ -1026,10 +1100,12 @@ class CalendarPanel(QWidget):
                 selection-color: {selected_text};
                 gridline-color: {self._calendar_grid_color};
                 border-radius: 6px;
+                border: none;
+                outline: none;
             }}
             QCalendarWidget QTableView::item {{
-                border: 1px solid {self._calendar_grid_color};
-                padding: 6px;
+                border: 1px solid transparent;
+                padding: 7px 4px;
                 border-radius: 4px;
             }}
             QCalendarWidget QTableView::item:hover {{
@@ -1208,20 +1284,14 @@ class CalendarPanel(QWidget):
         self._update_today_visibility()
         self._update_calendar_layout()
 
-    def resizeEvent(self, event):  # type: ignore[override]
-        super().resizeEvent(event)
-        self._update_calendar_layout()
-
     def eventFilter(self, obj, event):  # type: ignore[override]
         if obj is getattr(self, "calendar_row", None) and event.type() in (QEvent.Resize, QEvent.Show):
             self._single_shot_ui(0, self._update_calendar_layout)
         return super().eventFilter(obj, event)
-        self._enforce_calendar_min_width()
-        self.ensure_splitter_visible()
 
     def resizeEvent(self, event):  # type: ignore[override]
         super().resizeEvent(event)
-        self._enforce_calendar_min_width()
+        self._single_shot_ui(0, self.update_calendar_layout)
 
     def set_vault_root(self, vault_root: Optional[str], *, defer_refresh: bool = False) -> None:
         """Set vault root for calendar and tree data."""
@@ -1513,6 +1583,8 @@ class CalendarPanel(QWidget):
             self.zoom_in_btn,
             self.zoom_out_btn,
             getattr(self, "_print_btn", None),
+            getattr(self, "open_journal_button", None),
+            getattr(self, "today_btn", None),
             getattr(self, "activity_info_label", None),
             getattr(self, "activity_view", None),
             getattr(self, "activity_load_btn", None),
@@ -1552,6 +1624,14 @@ class CalendarPanel(QWidget):
             except Exception:
                 pass
         self._enforce_calendar_min_width()
+        heading_font = QFont(font)
+        heading_font.setPointSize(self._font_size + 1)
+        heading_font.setBold(True)
+        self.insight_title.setFont(heading_font)
+        if hasattr(self, "month_title"):
+            self.month_title.setFont(heading_font)
+        for cal in (self.calendar, self.prev_calendar, self.next_calendar):
+            cal.setMinimumHeight(max(200, cal.fontMetrics().height() * 8 + 12))
 
     def _calendar_min_width(self) -> int:
         fm = self.calendar.fontMetrics()
@@ -1580,10 +1660,9 @@ class CalendarPanel(QWidget):
                 pass
         try:
             if getattr(self, "_calendar_container", None):
-                total = min_w
-                if getattr(self, "_show_three_calendars", False) and getattr(self, "calendar_row_layout", None):
-                    total = min_w * 3 + self.calendar_row_layout.spacing() * 2
-                self._calendar_container.setMinimumWidth(total)
+                # Auxiliary months must not lock the parent at its wide width;
+                # the responsive row hides them when the rail narrows again.
+                self._calendar_container.setMinimumWidth(min_w)
         except Exception:
             pass
 
@@ -1924,7 +2003,8 @@ class CalendarPanel(QWidget):
             sizes = self.main_splitter.sizes()
         except Exception:
             return
-        config.save_splitter_sizes(self._splitter_key, sizes)
+        key = f"{self._splitter_key}_compact" if self._compact_insights_layout else self._splitter_key
+        config.save_splitter_sizes(key, sizes)
 
     def _save_header_state(self) -> None:
         try:
@@ -1965,8 +2045,6 @@ class CalendarPanel(QWidget):
         self.activity_copy_btn.clicked.connect(self._copy_activity_markdown)
         header.addWidget(title)
         header.addStretch(1)
-        header.addWidget(self.recent_journal_checkbox)
-        header.addWidget(self.activity_scope_combo)
         header.addWidget(self.activity_load_btn)
         header.addWidget(self.activity_copy_btn)
         header.addWidget(self.activity_print_btn)
@@ -1980,6 +2058,10 @@ class CalendarPanel(QWidget):
         self.activity_view.anchorClicked.connect(self._on_activity_anchor_clicked)
 
         layout.addLayout(header)
+        filters = QHBoxLayout()
+        filters.addWidget(self.recent_journal_checkbox)
+        filters.addWidget(self.activity_scope_combo, 1)
+        layout.addLayout(filters)
         layout.addWidget(self.activity_info_label)
         layout.addWidget(self.activity_view, 1)
         self.activity_copy_btn.setEnabled(False)
@@ -2388,6 +2470,8 @@ class CalendarPanel(QWidget):
             pass
 
     def _on_month_changed(self, year: int, month: int) -> None:
+        if hasattr(self, "month_title"):
+            self.month_title.setText(QDate(year, month, 1).toString("MMMM yyyy"))
         self._update_calendar_dates(year, month)
         self._schedule_selection_detail_refresh(self.calendar.selectedDate())
         if not self._suppress_task_filter_sync:
@@ -2399,6 +2483,30 @@ class CalendarPanel(QWidget):
             except Exception:
                 pass
         self._update_today_visibility()
+
+    def _choose_month(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Go to month")
+        layout = QVBoxLayout(dialog)
+        row = QHBoxLayout()
+        month = QComboBox()
+        month.setAccessibleName("Month")
+        for number in range(1, 13):
+            month.addItem(QDate(2000, number, 1).toString("MMMM"), number)
+        month.setCurrentIndex(self.calendar.monthShown() - 1)
+        year = QSpinBox()
+        year.setAccessibleName("Year")
+        year.setRange(1, 9999)
+        year.setValue(self.calendar.yearShown())
+        row.addWidget(month, 1)
+        row.addWidget(year)
+        layout.addLayout(row)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() == QDialog.Accepted:
+            self.calendar.setCurrentPage(year.value(), month.currentData())
 
     def _set_single_selection(self, date: QDate) -> None:
         if not date or not date.isValid():
@@ -2449,8 +2557,22 @@ class CalendarPanel(QWidget):
     def _update_today_visibility(self) -> None:
         if not hasattr(self, "today_btn"):
             return
-        today = QDate.currentDate()
-        self.today_btn.setVisible(self.calendar.selectedDate() != today)
+        self.today_btn.setVisible(True)
+        self.today_btn.setEnabled(True)
+
+    def _open_selected_journal(self) -> None:
+        selected = self.calendar.selectedDate()
+        self._last_activation_source = "button"
+        self.dateActivated.emit(selected.year(), selected.month(), selected.day())
+
+    def _set_insight_tags(self, tags: list[str]) -> None:
+        self.insight_tags.setText("  ·  ".join(tags[:8]))
+        self.insight_tags.setVisible(bool(tags))
+
+    def _set_insight_counts(self, files: int) -> None:
+        file_label = "journal file" if files == 1 else "journal files"
+        task_label = "matching task" if self._due_task_count == 1 else "matching tasks"
+        self.insight_counts.setText(f"{files} {file_label}  ·  {self._due_task_count} {task_label}")
 
     def _update_calendar_layout(self) -> None:
         if not getattr(self, "calendar_row_layout", None):
@@ -2499,39 +2621,28 @@ class CalendarPanel(QWidget):
                 total = 0
         if total <= 0:
             return
-        left_min = max(180, self.day_insights.minimumWidth() or 0)
+        left_min = max(320, self.day_insights.minimumWidth() or 0)
         right_hint = 0
         try:
             right_hint = self.journal_tabs.minimumSizeHint().width()
         except Exception:
             right_hint = 0
         right_min = max(260, right_hint)
-        should_hide = total < (left_min + right_min)
-        if should_hide == self._hide_insights_tabs:
+        compact = total < (left_min + right_min)
+        if compact == self._compact_insights_layout:
             return
-        self._hide_insights_tabs = should_hide
-        if should_hide:
-            try:
-                self._main_splitter_sizes_before_hide = self.main_splitter.sizes()
-            except Exception:
-                self._main_splitter_sizes_before_hide = None
-            self.journal_tabs.setVisible(False)
-            try:
-                self.main_splitter.setSizes([total, 0])
-            except Exception:
-                pass
+        self._compact_insights_layout = compact
+        self.journal_tabs.setVisible(True)
+        if compact:
+            self._wide_insight_sizes = self.main_splitter.sizes()
+            self.main_splitter.setOrientation(Qt.Vertical)
+            height = max(360, self.main_splitter.height())
+            self.main_splitter.setSizes(config.load_splitter_sizes(f"{self._splitter_key}_compact")
+                                       or [min(240, height // 2), max(180, height - 240)])
         else:
-            self.journal_tabs.setVisible(True)
-            if self._main_splitter_sizes_before_hide and len(self._main_splitter_sizes_before_hide) >= 2:
-                try:
-                    self.main_splitter.setSizes(self._main_splitter_sizes_before_hide)
-                except Exception:
-                    pass
-            else:
-                try:
-                    self.main_splitter.setSizes([left_min, max(1, total - left_min)])
-                except Exception:
-                    pass
+            self.main_splitter.setOrientation(Qt.Horizontal)
+            width = max(left_min, min(400, int(total * 0.4)))
+            self.main_splitter.setSizes(self._wide_insight_sizes or [width, max(1, total - width)])
 
     def _sync_aux_calendars(self) -> None:
         if not getattr(self, "_show_three_calendars", False):
@@ -3156,10 +3267,12 @@ class CalendarPanel(QWidget):
             self._update_insights(date, current_path)
 
     def _update_insights_multi(self, dates: list[QDate], current_path: Optional[str] = None) -> None:
+        self.open_journal_button.setEnabled(False)
+        self.subpage_list.set_empty_text("No journal pages for this selection.")
         if not self.vault_root:
             self.insight_title.setText("No date selected")
             self.insight_counts.setText("")
-            self.insight_tags.setText("")
+            self._set_insight_tags([])
             self.subpage_list.clear()
             try:
                 self.headings_list.clear()
@@ -3168,7 +3281,6 @@ class CalendarPanel(QWidget):
             return
         tags: list[str] = []
         total_files: list[Path] = []
-        day_entries = 0
         self.subpage_list.clear()
         try:
             self.headings_list.clear()
@@ -3204,7 +3316,6 @@ class CalendarPanel(QWidget):
 
             if day_page.exists():
                 total_files.append(day_page)
-                day_entries += 1
             subpages = self._list_day_subpages(base_dir)
             for label, rel in subpages:
                 target = Path(self.vault_root) / rel.lstrip("/")
@@ -3224,15 +3335,14 @@ class CalendarPanel(QWidget):
             tags.extend(indexer._extract_page_tags(text))
         unique_tags = sorted(set(tags))
         entries_count = len(total_files)
-        subpages_count = max(0, entries_count - day_entries)
         self.insight_title.setText(f"Selected {len(dates)} days")
         # Show the filtered indicator so user can clear the multi-day filter
         try:
             self.filter_btn.setVisible(True)
         except Exception:
             pass
-        self.insight_counts.setText(f"Entries: {entries_count}  •  Subpages: {subpages_count}  •  Tasks: {self._due_task_count}")
-        self.insight_tags.setText("Tags: " + (", ".join(unique_tags[:8]) if unique_tags else "—"))
+        self._set_insight_counts(entries_count)
+        self._set_insight_tags(unique_tags)
         # Populate recently edited for selected dates
         self._populate_recent_modified(dates, current_path=current_path, expand_single=False)
         if current_path:
@@ -3581,7 +3691,7 @@ class CalendarPanel(QWidget):
         try:
             from PySide6.QtWidgets import QHeaderView
             header.setSectionResizeMode(0, QHeaderView.Interactive)
-            header.setSectionResizeMode(1, QHeaderView.Interactive)
+            header.setSectionResizeMode(1, QHeaderView.Stretch)
             if self._show_task_start_column:
                 header.setSectionResizeMode(2, QHeaderView.Interactive)
                 header.setSectionResizeMode(3, QHeaderView.Interactive)
@@ -4395,10 +4505,13 @@ class CalendarPanel(QWidget):
         self.tasksUpdated.emit()
 
     def _update_insights(self, date: QDate, current_path: Optional[str] = None) -> None:
+        self.open_journal_button.setEnabled(bool(self.vault_root) and date.isValid())
+        self._headings_col.setVisible(True)
+        self.subpage_list.set_empty_text("No additional journal pages for this day.")
         if not self.vault_root or not date.isValid():
             self.insight_title.setText("No date selected")
             self.insight_counts.setText("")
-            self.insight_tags.setText("")
+            self._set_insight_tags([])
             self.recent_list.clear()
             self.subpage_list.clear()
             try:
@@ -4411,7 +4524,7 @@ class CalendarPanel(QWidget):
         if not base_dir.exists():
             self.insight_title.setText(self._pretty_date_label(date))
             self.insight_counts.setText("No journal entry.")
-            self.insight_tags.setText("")
+            self._set_insight_tags([])
             self.recent_list.clear()
             self.subpage_list.clear()
             try:
@@ -4434,15 +4547,14 @@ class CalendarPanel(QWidget):
                 continue
             tags.extend(indexer._extract_page_tags(text))
         unique_tags = sorted(set(tags))
-        subpages_count = max(0, len(files) - 1)
         self.insight_title.setText(self._pretty_date_label(date))
         # Hide filter when viewing a single day
         try:
             self.filter_btn.setVisible(False)
         except Exception:
             pass
-        self.insight_counts.setText(f"Entries: {len(files)}  •  Subpages: {subpages_count}  •  Tasks: {self._due_task_count}")
-        self.insight_tags.setText("Tags: " + (", ".join(unique_tags[:8]) if unique_tags else "—"))
+        self._set_insight_counts(len(files))
+        self._set_insight_tags(unique_tags)
         # Populate pages + headings list
         self.subpage_list.clear()
         self.recent_list.clear()
@@ -4485,6 +4597,7 @@ class CalendarPanel(QWidget):
                 short = label
             item = QListWidgetItem(short)
             item.setData(PATH_ROLE, rel)
+            item.setToolTip(f"{short}\n{rel}")
             self.subpage_list.addItem(item)
         # Recently edited pages for the selected day (±1 day window)
         self._populate_recent_modified([date], current_path=current_path, expand_single=True)

@@ -560,6 +560,11 @@ class PreferencesDialog(QDialog):
         task_layout.addWidget(self.show_task_page_checkbox)
         task_layout.addStretch(1)
 
+        audio_layout = add_section("Audio")
+        from .audio_preferences import AudioPreferences
+        self.audio_preferences = AudioPreferences(self)
+        audio_layout.addWidget(self.audio_preferences)
+
         # AI Chat
         ai_layout = add_section("AI Chat")
         self.enable_ai_chats_checkbox = QCheckBox("Enable AI Chats")
@@ -1257,6 +1262,7 @@ class PreferencesDialog(QDialog):
     
     def accept(self):
         """Save preferences when OK is clicked."""
+        self.audio_preferences.save()
         config.save_toc_widget_enabled(self.toc_widget_checkbox.isChecked())
         config.save_page_editor_toc_widget_enabled(self.page_editor_toc_widget_checkbox.isChecked())
         config.save_vi_mode_enabled(self.vi_enable_checkbox.isChecked())

@@ -8,7 +8,7 @@ import threading
 from pathlib import Path
 from typing import Callable, Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal, QSize, QMimeData, QPointF, QRect, QUrl, QByteArray, QBuffer, QIODevice, QObject, QRegularExpression, QEvent
+from PySide6.QtCore import Qt, QTimer, Signal, QSize, QMimeData, QPointF, QRect, QRectF, QUrl, QByteArray, QBuffer, QIODevice, QObject, QRegularExpression, QEvent
 from PySide6.QtGui import QKeySequence, QShortcut, QPixmap, QImage, QTextCursor, QFont, QFontDatabase, QDesktopServices, QNativeGestureEvent, QSyntaxHighlighter, QTextCharFormat
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -31,7 +31,8 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTextEdit,
 )
-from PySide6.QtGui import QPainter, QColor, QTextFormat
+from PySide6.QtGui import QPainter, QPen, QColor, QTextFormat
+from .diagram_editor_search import DiagramEditorSearch
 
 from sp.app.plantuml_renderer import PlantUMLRenderer, RenderResult
 from .ai_chat_panel import ApiWorker, ServerManager
@@ -170,6 +171,9 @@ def style_diagram_code_editor(
     editor.setObjectName("diagramSourceEditor")
     editor.set_diagram_theme_prefix(theme_prefix)
     editor.setCursorWidth(2)
+    if hasattr(editor, "_default_cursor_width"):
+        editor._default_cursor_width = 2
+        editor._apply_cursor_style()
     editor.setStyleSheet(
         "QPlainTextEdit#diagramSourceEditor {"
         f"background-color: {background.name()}; color: {text.name()};"
@@ -272,7 +276,7 @@ class PlainTextEditWithLineNumbers(QPlainTextEdit):
             for selection in self.extraSelections()
             if selection.format.property(self._CURRENT_LINE_EXTRA_KEY) is None
         ]
-        if not self.isReadOnly():
+        if not self.isReadOnly() and not getattr(self, "_vi_mode_active", False):
             editor_background = theme_color(
                 f"{self._diagram_theme_prefix}.editor.bg", "#10151c"
             )
@@ -351,6 +355,9 @@ class ViPlainTextEdit(PlainTextEditWithLineNumbers):
     """PlainTextEdit with a lightweight vi-style navigation mode."""
 
     viInsertModeChanged = Signal(bool)
+    findBarRequested = Signal(bool, bool, str)
+    searchRepeatRequested = Signal(bool)
+    searchWordRequested = Signal(bool)
     _VI_BLOCK_EXTRA_KEY = int(QTextFormat.UserProperty) + 4100
     _VI_LINE_EXTRA_KEY = int(QTextFormat.UserProperty) + 4101
 
@@ -384,6 +391,7 @@ class ViPlainTextEdit(PlainTextEditWithLineNumbers):
         else:
             self._vi_insert_mode = False
             self._vi_mode_active = False
+            self._highlight_current_line()
             self._apply_cursor_style()
             self._update_vi_cursor_highlight()
             self.viInsertModeChanged.emit(False)
@@ -400,7 +408,8 @@ class ViPlainTextEdit(PlainTextEditWithLineNumbers):
         self.set_vi_cursor_style("block" if enabled else "line")
 
     def _apply_cursor_style(self) -> None:
-        if self._vi_feature_enabled and self._vi_mode_active:
+        if self._vi_feature_enabled and self._vi_mode_active and self._vi_cursor_style == "block":
+            self._vi_block_cursor_width = max(2, self.fontMetrics().horizontalAdvance("M"))
             self.setCursorWidth(self._vi_block_cursor_width)
         else:
             self.setCursorWidth(self._default_cursor_width)
@@ -415,6 +424,7 @@ class ViPlainTextEdit(PlainTextEditWithLineNumbers):
         self._pending_y = False
         self._pending_g = False
         self._apply_cursor_style()
+        self._highlight_current_line()
         self._update_vi_cursor_highlight()
         if emit_needed:
             self.viInsertModeChanged.emit(False)
@@ -428,6 +438,7 @@ class ViPlainTextEdit(PlainTextEditWithLineNumbers):
         self._pending_y = False
         self._pending_g = False
         self._apply_cursor_style()
+        self._highlight_current_line()
         self._update_vi_cursor_highlight()
         self.viInsertModeChanged.emit(True)
 
@@ -440,10 +451,12 @@ class ViPlainTextEdit(PlainTextEditWithLineNumbers):
         ]
         if not self._vi_feature_enabled or not self._vi_mode_active:
             self.setExtraSelections(existing)
+            self.viewport().update()
             return
         cursor = self.textCursor()
         if cursor.hasSelection():
             self.setExtraSelections(existing)
+            self.viewport().update()
             return
         bg, fg = self._vi_cursor_colors()
         extra = QTextEdit.ExtraSelection()
@@ -456,14 +469,32 @@ class ViPlainTextEdit(PlainTextEditWithLineNumbers):
             extra.format.setForeground(fg)
             extra.format.setProperty(QTextFormat.FullWidthSelection, False)
             extra.format.setProperty(self._VI_BLOCK_EXTRA_KEY, True)
-        else:
-            extra.cursor = cursor
-            extra.format.setBackground(bg)
-            extra.format.setForeground(fg)
-            extra.format.setProperty(QTextFormat.FullWidthSelection, True)
-            extra.format.setProperty(self._VI_LINE_EXTRA_KEY, True)
-        existing.append(extra)
+            existing.append(extra)
         self.setExtraSelections(existing)
+        self.viewport().update()
+
+    def _vi_line_outline_rect(self) -> QRect:
+        if (not self._vi_mode_active or self._vi_cursor_style != "line"
+                or self.document().isEmpty() or self.textCursor().hasSelection()):
+            return QRect()
+        row = self.cursorRect()
+        return QRect(1, row.top(), max(0, self.viewport().width() - 2), row.height())
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.FontChange and hasattr(self, "_default_cursor_width"):
+            self._apply_cursor_style()
+            self._update_vi_cursor_highlight()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        outline = self._vi_line_outline_rect()
+        if not outline.isEmpty():
+            painter = QPainter(self.viewport())
+            painter.setPen(QPen(self._vi_cursor_colors()[0], 1.0))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(QRectF(outline).adjusted(0.5, 0.5, -0.5, -0.5))
+            painter.end()
 
     def _vi_cursor_colors(self) -> tuple[QColor, QColor]:
         accent_value = config.load_vault_accent_color() or theme_color("vi_navigation_line.bg", "#2a3950").name()
@@ -528,6 +559,18 @@ class ViPlainTextEdit(PlainTextEditWithLineNumbers):
             return super().keyPressEvent(event)
 
         # g + g -> start of document
+        if key in (Qt.Key_Slash, Qt.Key_Question, Qt.Key_Asterisk, Qt.Key_NumberSign) or (key == Qt.Key_N and not mods):
+            self._pending_d = self._pending_y = self._pending_g = False
+            if key in (Qt.Key_Slash, Qt.Key_Question):
+                seed = self.textCursor().selectedText().replace("\u2029", "\n")
+                self.findBarRequested.emit(False, key == Qt.Key_Question, seed)
+            elif key == Qt.Key_N:
+                self.searchRepeatRequested.emit(False)
+            else:
+                self.searchWordRequested.emit(key == Qt.Key_NumberSign)
+            event.accept()
+            return
+
         if key == Qt.Key_G and self._pending_g:
             self._pending_g = False
             self._move_cursor(QTextCursor.Start)
@@ -1198,6 +1241,7 @@ class PlantUMLEditorWindow(QMainWindow):
         editor_layout.setContentsMargins(0, 0, 0, 0)
         editor_layout.addLayout(editor_section)
         editor_layout.addWidget(self.editor, 1)
+        self._find_replace = DiagramEditorSearch(self, self.editor, editor_layout)
         main_h_splitter.addWidget(editor_container)
         
         # RIGHT: Vertical splitter with Preview (top) and Chat (bottom)

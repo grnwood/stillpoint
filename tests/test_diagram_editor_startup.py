@@ -1565,3 +1565,44 @@ def test_diagram_header_state_is_separate_for_each_editor_kind(qtbot, monkeypatc
     reopened_plant = diagram_editor_header.DiagramEditorHeader("plantuml", "main")
     qtbot.addWidget(reopened_plant)
     assert reopened_plant.header_toggle.isChecked()
+
+
+@pytest.mark.parametrize("kind", ["plantuml", "mermaid"])
+def test_diagram_windows_share_editor_find_and_vi_preferences(qtbot, monkeypatch, tmp_path, kind):
+    from PySide6.QtGui import QPalette, QTextCursor
+    from PySide6.QtTest import QTest
+    from sp.app import config
+
+    _patch_common_editor_deps(monkeypatch)
+    monkeypatch.setattr(config, "load_vi_mode_enabled", lambda: True)
+    monkeypatch.setattr(config, "load_vi_cursor_style", lambda: "block")
+    monkeypatch.setattr(PlantUMLEditorWindow, "_render", lambda self: None)
+    monkeypatch.setattr(MermaidEditorWindow, "_render", lambda self: None)
+    monkeypatch.setattr(mermaid_editor_window, "_should_use_web_preview", lambda: False)
+    monkeypatch.setattr(mermaid_editor_window, "_inline_preview_preference_enabled", lambda: False)
+    source = tmp_path / ("search.puml" if kind == "plantuml" else "search.mmd")
+    text = "@startuml\nAlice -> Bob\nBob -> Alice\n@enduml\n" if kind == "plantuml" else "flowchart TD\nAlice --> Bob\nBob --> Alice\n"
+    source.write_text(text)
+    window = PlantUMLEditorWindow(str(source)) if kind == "plantuml" else MermaidEditorWindow(str(source))
+    qtbot.addWidget(window)
+    window.activateWindow()
+    window.editor.moveCursor(QTextCursor.Start)
+    window.editor.setFocus()
+    QTest.qWait(20)
+    assert window.editor._vi_cursor_style == "block"
+    assert window.editor._vi_mode_active
+    QTest.keyClick(window.editor, Qt.Key_Slash)
+    assert window.find_bar.isVisible()
+    assert window.find_bar.query_edit.hasFocus()
+    window.find_bar.query_edit.setText("Alice")
+    QTest.keyClick(window.find_bar.query_edit, Qt.Key_Return)
+    assert window.editor.textCursor().selectedText() == "Alice"
+    QTest.keyClick(window.find_bar.query_edit, Qt.Key_Escape)
+    assert window.editor.hasFocus()
+    assert window.editor._vi_mode_active
+    QTest.keyClick(window.editor, Qt.Key_F, Qt.ControlModifier)
+    assert window.find_bar.isVisible()
+    QTest.keyClick(window.find_bar.query_edit, Qt.Key_Escape)
+    assert window.editor.toPlainText() == text
+    assert window.find_bar.palette().color(QPalette.Base).name() == window.editor.palette().color(QPalette.Base).name()
+    window.close()

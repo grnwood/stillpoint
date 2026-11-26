@@ -4344,6 +4344,27 @@ class MainWindow(QMainWindow):
         self.main_toolbar_identity.hide()
         self._update_main_utility_identity()
         
+        # Keep right-rail destinations available in both edit and reading mode.
+        self._right_header_actions = {}
+        for key, title, asset, callback in (
+            ("tasks", "Tasks", "complete-task.svg", self._focus_tasks_search),
+            ("calendar", "Calendar", "calendar-days.svg", self._focus_calendar_tab),
+            ("links", "Link Navigator", "link.svg", self._focus_link_navigator),
+            ("map", "Map", "mindmap.svg", self._focus_map_tab),
+            ("ai", "AI Chat", "ai.svg", self._focus_ai_header_tab),
+        ):
+            action = QAction(title, self)
+            action.setObjectName(f"rightHeader_{key}")
+            action.setToolTip(f"Show {title}")
+            action.setProperty("headerIconAsset", asset)
+            icon = self._load_icon(self._find_asset(asset), icon_color, size=18)
+            if icon:
+                action.setIcon(icon)
+            action.triggered.connect(callback)
+            self.toolbar.addAction(action)
+            self._right_header_actions[key] = action
+        self._sync_right_header_actions()
+
         # Page attachments stay beside Settings in both edit and reading mode.
         attachment_icon = self._load_icon(
             self._find_asset("attachment-paperclip.svg"), icon_color, size=18,
@@ -11778,6 +11799,7 @@ class MainWindow(QMainWindow):
             enable_map=new_map,
         )
         self.right_panel.set_ai_enabled(new_ai)
+        self._sync_right_header_actions()
         self.editor.set_ai_actions_enabled(new_ai)
         if new_tags and self.tags_tab is None:
             self.tags_tab = TagsTab(http_client=self.http)
@@ -12129,6 +12151,10 @@ class MainWindow(QMainWindow):
                     action.setIcon(icon)
             except Exception:
                 pass
+        for action in getattr(self, "_right_header_actions", {}).values():
+            icon = self._load_icon(self._find_asset(action.property("headerIconAsset")), icon_color, size=18)
+            if icon:
+                action.setIcon(icon)
         try:
             self._update_sidebar_toggle_icons()
         except Exception:
@@ -22344,6 +22370,25 @@ class MainWindow(QMainWindow):
         )
         if icon is not None:
             action.setIcon(icon)
+
+    def _sync_right_header_actions(self) -> None:
+        enabled = {
+            "tasks": self._feature_tasks_enabled,
+            "calendar": self._feature_calendar_enabled,
+            "links": self._feature_link_navigator_enabled,
+            "map": self._feature_map_enabled,
+            "ai": config.load_enable_ai_chats(),
+        }
+        for key, action in getattr(self, "_right_header_actions", {}).items():
+            action.setVisible(bool(enabled[key]))
+
+    def _focus_ai_header_tab(self) -> None:
+        if self.current_path:
+            self._open_ai_chat_for_path(self.current_path, create=False)
+        elif self.right_panel.ai_chat_panel is not None:
+            self._ensure_right_panel_visible()
+            self.right_panel.focus_ai_chat()
+            self.right_panel.focus_ai_chat_input()
 
     def _focus_vault_tab(self) -> None:
         """Switch to Vault tab and focus the tree."""

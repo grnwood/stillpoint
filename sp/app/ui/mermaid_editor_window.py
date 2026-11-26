@@ -428,6 +428,8 @@ class MermaidEditorWindow(QMainWindow):
         editor_layout.setContentsMargins(0, 0, 0, 0)
         editor_layout.addLayout(editor_section)
         editor_layout.addWidget(self.editor, 1)
+        from .diagram_editor_search import DiagramEditorSearch
+        self._find_replace = DiagramEditorSearch(self, self.editor, editor_layout)
         editor_container.setLayout(editor_layout)
         main_h_splitter.addWidget(editor_container)
 

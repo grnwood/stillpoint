@@ -21,8 +21,12 @@ class FindReplaceBar(QWidget):
     replaceAllRequested = Signal(str, str, bool)  # query, replacement, case_sensitive
     closed = Signal()
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, *, palette_source=None) -> None:
         super().__init__(parent)
+        self._palette_source = palette_source
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setAutoFillBackground(True)
+        self.setBackgroundRole(QPalette.Base)
         self.setVisible(False)
         self.setObjectName("findReplaceBar")
         self._pending_backwards: Optional[bool] = None
@@ -83,6 +87,7 @@ class FindReplaceBar(QWidget):
     def _resolve_palette(self) -> QPalette:
         parent = self.parentWidget()
         sources = (
+            self._palette_source,
             parent,
             getattr(parent, "editor", None),
             self,
@@ -108,10 +113,18 @@ class FindReplaceBar(QWidget):
 
     def _apply_theme_palette(self) -> None:
         palette = self._resolve_palette()
+        if self._palette_source is not None:
+            base = palette.color(QPalette.Base)
+            surface = base.lighter(125) if base.lightness() < 128 else base.darker(105)
+            palette.setColor(QPalette.Button, surface)
+            palette.setColor(QPalette.ButtonText, palette.color(QPalette.Text))
+            palette.setColor(QPalette.AlternateBase, surface)
+            palette.setColor(QPalette.Window, base)
+            palette.setColor(QPalette.WindowText, palette.color(QPalette.Text))
         self.setPalette(palette)
         self.query_edit.setPalette(palette)
         self.replace_edit.setPalette(palette)
-        self.setStyleSheet(
+        stylesheet = (
             "#findReplaceBar {"
             "  background: palette(base);"
             "  color: palette(text);"
@@ -148,6 +161,17 @@ class FindReplaceBar(QWidget):
             "  background: palette(alternate-base);"
             "}"
         )
+        if self._palette_source is not None:
+            # Stylesheet palette() lookups can resolve against the host window
+            # rather than the diagram surface's explicit palette after polish.
+            for name, role in (
+                ("base", QPalette.Base), ("text", QPalette.Text), ("mid", QPalette.Mid),
+                ("button", QPalette.Button), ("button-text", QPalette.ButtonText),
+                ("alternate-base", QPalette.AlternateBase), ("highlight", QPalette.Highlight),
+                ("highlighted-text", QPalette.HighlightedText),
+            ):
+                stylesheet = stylesheet.replace(f"palette({name})", palette.color(role).name())
+        self.setStyleSheet(stylesheet)
 
     def _emit_find(self, backwards: Optional[bool] = None) -> None:
         direction: bool
@@ -209,7 +233,7 @@ class FindReplaceBar(QWidget):
         if event.type() == QEvent.KeyPress:
             if event.key() in (Qt.Key_Return, Qt.Key_Enter):
                 if obj == self.query_edit:
-                    backwards = bool(event.modifiers() & Qt.ShiftModifier)
+                    backwards = bool(event.modifiers() & Qt.ShiftModifier) or bool(self._pending_backwards)
                     self._emit_find(backwards=backwards)
                     return True
                 if obj == self.replace_edit:

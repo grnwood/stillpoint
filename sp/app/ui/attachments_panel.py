@@ -233,6 +233,8 @@ class AttachmentsPanel(QWidget):
         self._remote_cache_root: Optional[Path] = None
         self._remote_cache_key: Optional[str] = None
         self._remote_vault_root: Optional[Path] = None
+        self._voice_dialog = None
+        self._audio_player = None
         
         self.current_page_path: Optional[Path] = None
         self.zoom_level = 0  # 0=list, 1=small icons, 2=medium icons, 3=large icons
@@ -261,6 +263,15 @@ class AttachmentsPanel(QWidget):
         self.add_button.clicked.connect(self._add_attachments)
         self.add_button.setEnabled(False)
         toolbar.addWidget(self.add_button)
+
+        self.record_button = QToolButton()
+        self.record_button.setIcon(QIcon(str(Path(__file__).resolve().parents[2] / "assets" / "microphone.svg")))
+        self.record_button.setText("Record")
+        self.record_button.setToolTip("Record a voice note")
+        self.record_button.setAccessibleName("Record a voice note")
+        self.record_button.setEnabled(False)
+        self.record_button.clicked.connect(self._record_voice_note)
+        toolbar.addWidget(self.record_button)
 
         self.remove_button = QToolButton()
         self.remove_button.setText("−")
@@ -430,6 +441,7 @@ class AttachmentsPanel(QWidget):
     def _refresh_attachments(self) -> None:
         """Refresh the list of attachments for the current page."""
         t0 = time.perf_counter()
+        self.record_button.setEnabled(False)
         self.attachments_list.clear()
         self.empty_label.setText("No attachments.")
         self.empty_label.show()
@@ -439,6 +451,7 @@ class AttachmentsPanel(QWidget):
             return
         
         if not self.current_page_path:
+            self.add_button.setEnabled(False)
             self.open_folder_button.setEnabled(False)
             self.refresh_button.setEnabled(False)
             #if PAGE_LOGGING_ENABLED:
@@ -465,6 +478,7 @@ class AttachmentsPanel(QWidget):
         self.open_folder_button.setEnabled(True)
         self.refresh_button.setEnabled(True)
         self.add_button.setEnabled(True)
+        self.record_button.setEnabled(True)
         
         # Update view mode based on zoom level
         self._update_view_mode()
@@ -531,6 +545,7 @@ class AttachmentsPanel(QWidget):
         self.open_folder_button.setEnabled(False)
         self.refresh_button.setEnabled(True)
         self.add_button.setEnabled(True)
+        self.record_button.setEnabled(True)
         self._update_view_mode()
         try:
             resp = self._http_client.get("/files/", params={"page_path": page_key})
@@ -797,6 +812,73 @@ class AttachmentsPanel(QWidget):
                 if attachment_path:
                     names.add(Path(str(attachment_path)).name)
         return names
+
+    def _record_voice_note(self) -> None:
+        if not self.current_page_path:
+            return
+        if self._voice_dialog is not None:
+            self._voice_dialog.raise_()
+            self._voice_dialog.activateWindow()
+            return
+        try:
+            from .voice_note_dialog import VoiceNoteDialog
+        except (ImportError, RuntimeError) as exc:
+            QMessageBox.warning(self, "Voice recording unavailable", f"Qt Multimedia could not be loaded: {exc}")
+            return
+        # Bind the destination now; a later page/vault switch must never redirect
+        # a recording. The worker uses these snapshots, not mutable panel state.
+        page = self.current_page_path
+        page_key = self._current_page_key()
+        remote = self._remote_mode
+        client = self._http_client
+        if remote and (client is None or not page_key):
+            return
+
+        def save_attachment(source: Path, filename: str) -> str:
+            if remote:
+                with source.open("rb") as stream:
+                    response = client.post(
+                        "/files/attach", data={"page_path": page_key},
+                        files={"files": (filename, stream, "audio/mp4" if source.suffix == ".m4a" else "audio/wav")},
+                    )
+                response.raise_for_status()
+                return filename
+            if not page.is_file():
+                raise OSError("The destination page no longer exists.")
+            # Exclusive creation prevents overwriting an existing attachment.
+            for index in itertools.count():
+                name = filename if not index else f"{Path(filename).stem} ({index}){Path(filename).suffix}"
+                destination = page.parent / name
+                try:
+                    output = destination.open("xb")
+                except FileExistsError:
+                    continue
+                try:
+                    with output, source.open("rb") as stream:
+                        shutil.copyfileobj(stream, output)
+                except OSError:
+                    destination.unlink(missing_ok=True)
+                    raise
+                return name
+
+        dialog = VoiceNoteDialog(self, page_key or str(page), save_attachment,
+                                 auth_prompt=self._auth_prompt if remote else None)
+        self._voice_dialog = dialog
+
+        def saved(filename):
+            if self.current_page_path == page and self._remote_mode == remote:
+                self._refresh_attachments()
+                for row in range(self.attachments_list.count()):
+                    item = self.attachments_list.item(row)
+                    if Path(_item_path(item)).name == filename:
+                        self.attachments_list.setCurrentItem(item)
+                        break
+            if not remote:
+                self.attachmentsModified.emit("voice note recorded")
+
+        dialog.attachmentSaved.connect(saved)
+        dialog.finished.connect(lambda _result: setattr(self, "_voice_dialog", None))
+        dialog.show()
 
     def _add_attachments(self) -> None:
         """Prompt user to add attachments via the OS file picker."""
@@ -1100,8 +1182,12 @@ class AttachmentsPanel(QWidget):
             self._refresh_attachments()
     
     def _open_attachment(self, item) -> None:
-        """Open the selected attachment. Diagram files open in editors, others use default handler."""
+        """Open diagrams in editors, audio in the player, and other files externally."""
         data = item.data(Qt.UserRole)
+        path = _item_path(item)
+        if path and Path(path).suffix.lower() in _ATTACHMENT_TYPES["Audio"]:
+            self._play_audio_attachment(path)
+            return
         mermaid_suffixes = {".mmd", ".mermaid"}
         if self._remote_mode and isinstance(data, dict):
             rel_path = data.get("path")
@@ -1154,6 +1240,26 @@ class AttachmentsPanel(QWidget):
                     if log_enabled("attachments_media"):
                         print(f"[Attachments] Double-click non-puml -> open default: {data}")
                     open_path_in_system(file_path)
+
+    def _play_audio_attachment(self, path: str) -> None:
+        if self._remote_mode and self._http_client is None:
+            return
+        try:
+            from .audio_player_dialog import AudioPlayerDialog
+        except (ImportError, RuntimeError) as exc:
+            QMessageBox.warning(self, "Audio playback unavailable", f"Qt Multimedia could not be loaded: {exc}")
+            return
+        if self._audio_player is None:
+            self._audio_player = AudioPlayerDialog(self)
+            self._audio_player.finished.connect(lambda _result: setattr(self, "_audio_player", None))
+        dialog = self._audio_player
+        if self._remote_mode:
+            dialog.open_remote(self._http_client, path, self._auth_prompt)
+        else:
+            dialog.open_local(Path(path))
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
     
     def refresh(self) -> None:
         """Refresh the attachments list."""

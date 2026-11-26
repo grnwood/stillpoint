@@ -977,6 +977,10 @@ def main() -> None:
         _run_webserver_mode(args)
         return
 
+    if __name__ == "__main__":
+        from sp.app.macos_permissions import relaunch_development_bundle
+        relaunch_development_bundle()
+
     startup_started_at = _MODULE_IMPORT_STARTED_AT
     phase_started_at = _record_startup_phase(
         "module_import", startup_started_at, startup_started_at

@@ -152,6 +152,7 @@ app = BUNDLE(
     icon=_icon_icns if os.path.exists(_icon_icns) else None,
     bundle_identifier='app.stillpoint.desktop',
     info_plist={
+        'NSMicrophoneUsageDescription': 'Record voice notes and save them as page attachments.',
         'CFBundleName': 'StillPoint',
         'CFBundleDisplayName': 'StillPoint',
         'CFBundleVersion': STILLPOINT_VERSION,

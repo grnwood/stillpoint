@@ -23,6 +23,7 @@ def open_page(window, path):
 @pytest.mark.parametrize("reading", [False, True])
 def test_attachment_shortcut_opens_hidden_right_panel(main_window, reading):
     window = main_window
+    window.resize(1200, 800)
     page_folder = Path(window.vault_root) / "PageA"
     (page_folder / "diagram.pdf").write_bytes(b"attachment")
     window._set_right_panel_collapsed(True)
