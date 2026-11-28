@@ -3720,7 +3720,7 @@ class MainWindow(QMainWindow):
         documentation_action.triggered.connect(self._open_help_documentation)
         help_menu.addAction(documentation_action)
         shortcuts_action = QAction("Keyboard Shortcuts", self)
-        shortcuts_action.setToolTip("Open the Keyboard Shortcuts page")
+        shortcuts_action.setToolTip("Show standard and vi keyboard shortcuts")
         shortcuts_action.triggered.connect(self._open_help_keyboard_shortcuts)
         help_menu.addAction(shortcuts_action)
         # AboutRole is required for Qt to place this action reliably in the
@@ -6893,19 +6893,9 @@ class MainWindow(QMainWindow):
             return False
 
     def _open_help_keyboard_shortcuts(self) -> None:
-        """Open the Keyboard Shortcuts page in the help vault."""
-        if not self._require_local_mode("Open keyboard shortcuts"):
-            return
-        try:
-            vault_path = self._ensure_user_help_vault()
-            rel_path = "/Shortcuts/Shortcuts.md"
-            if self.vault_root and Path(self.vault_root).resolve() == vault_path.resolve():
-                self._open_file(rel_path)
-                return
-            self._set_help_vault_last_file(vault_path, rel_path)
-            self._launch_vault_process(str(vault_path))
-        except Exception as exc:  # pragma: no cover - UI path
-            self._alert(f"Failed to open keyboard shortcuts: {exc}")
+        from .keyboard_shortcuts_dialog import KeyboardShortcutsDialog
+
+        KeyboardShortcutsDialog(self).open()
 
     def _create_vault(self) -> None:
         if not self._require_local_mode("Create a new vault"):

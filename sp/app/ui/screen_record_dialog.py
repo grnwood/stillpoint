@@ -251,8 +251,8 @@ class ScreenRecordDialog(AudioWindow):
         self._countdown.timeout.connect(self._countdown_tick)
         self._start_timeout = QTimer(self)
         self._start_timeout.setSingleShot(True)
-        self._start_timeout.setInterval(60000)
-        self._start_timeout.timeout.connect(lambda: self._fail("No screen frames received. Check screen-sharing permissions and try again."))
+        self._start_timeout.setInterval(60000 if self._wayland else 5000)
+        self._start_timeout.timeout.connect(self._capture_timed_out)
         QCoreApplication.instance().aboutToQuit.connect(self._shutdown)
         QGuiApplication.instance().screenRemoved.connect(self._screen_removed)
         if self._format is None:
@@ -314,15 +314,23 @@ class ScreenRecordDialog(AudioWindow):
         self._has_frame = False
         if not self._wayland:
             self.capture.setScreen(selected)
-        self.status.setText("Waiting for screen access…")
+        self.status.setText("Waiting for screen access…" if self._wayland else "Waiting for screen frames…")
         self._start_timeout.start()
         self.capture.start()
         return True
 
     def _screen_changed(self, _index):
         if self._state == "idle":
+            self._start_timeout.stop()
             self.capture.stop()
             self._has_frame = False
+            self.status.setText("Choose a screen to preview, or press Record")
+
+    def _capture_timed_out(self):
+        self._fail("No screen frames received. Try selecting a different display or restarting StillPoint."
+                   if sys.platform == "win32" else
+                   "No screen frames received. Check screen-sharing permissions and try again.")
+        if self._state == "idle":
             self.status.setText("Choose a screen to preview, or press Record")
 
     def _capture_active_changed(self, active):

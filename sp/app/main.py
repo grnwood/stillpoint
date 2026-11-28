@@ -15,6 +15,7 @@ from pathlib import Path
 
 _MODULE_IMPORT_STARTED_AT = time.perf_counter()
 
+import PySide6
 import uvicorn
 from PySide6.QtCore import Qt, QtMsgType, QTimer, qInstallMessageHandler
 from PySide6.QtWidgets import QApplication
@@ -24,6 +25,12 @@ from sp.app import config
 from sp.app import eventloop_diag
 from sp.logging_flags import log_enabled
 from sp.vault_boundary import NestedVaultError, validate_vault_root
+
+if sys.platform == "win32":
+    # Qt loads the FFmpeg plugin lazily. Keep its dependency directory registered
+    # for the lifetime of the process so Windows can resolve the bundled DLLs.
+    _qt_dll_directory = os.add_dll_directory(str(Path(PySide6.__file__).resolve().parent))
+    os.environ.setdefault("QT_SCREEN_CAPTURE_BACKEND", "grabwindow")
 
 from sp.app.ui.main_window import MainWindow
 from sp.app.ui.page_load_logger import emit_performance_span
