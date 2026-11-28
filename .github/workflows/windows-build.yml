@@ -31,13 +31,11 @@ jobs:
         run: |
           python packaging/fetch_ripgrep.py
           pyinstaller -y packaging/sp.spec
-          pyinstaller -y packaging/stillpoint-capture.spec
 
       - name: Smoke test bundle
         run: |
           if (!(Test-Path "dist/stillpoint/stillpoint.exe")) { throw "dist/stillpoint/stillpoint.exe not found" }
           if (!(Test-Path "dist/stillpoint/_internal/rg.exe")) { throw "bundled rg.exe not found" }
-          if (!(Test-Path "dist/stillpoint-capture/stillpoint-capture.exe")) { throw "dist/stillpoint-capture/stillpoint-capture.exe not found" }
 
       - name: Runtime smoke test (stillpoint startup)
         run: |
@@ -53,23 +51,6 @@ jobs:
           } else {
             Stop-Process -Id $proc.Id -Force
             Write-Host "stillpoint.exe started successfully and was terminated after smoke timeout."
-          }
-
-      - name: Runtime smoke test (stillpoint-capture startup)
-        run: |
-          $exe = "dist/stillpoint-capture/stillpoint-capture.exe"
-          $proc = Start-Process -FilePath $exe -PassThru
-          Start-Sleep -Seconds 8
-
-          if ($proc.HasExited) {
-            # Exit code 1 is expected on CI: "no local vault configured" is a clean exit, not a crash.
-            if ($proc.ExitCode -notin 0,1) {
-              throw "stillpoint-capture.exe exited early with unexpected code $($proc.ExitCode)"
-            }
-            Write-Host "stillpoint-capture.exe exited cleanly during smoke window (code $($proc.ExitCode))."
-          } else {
-            Stop-Process -Id $proc.Id -Force
-            Write-Host "stillpoint-capture.exe started successfully and was terminated after smoke timeout."
           }
 
       - name: Generate Inno version include

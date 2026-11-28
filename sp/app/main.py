@@ -1068,6 +1068,10 @@ def main() -> None:
             "vault_setup", phase_started_at, startup_started_at
         )
         if started:
+            from sp.app.ui.quick_capture_shortcut import QuickCaptureShortcut
+
+            qt_app._stillpoint_quick_capture_shortcut = QuickCaptureShortcut(qt_app)
+            QTimer.singleShot(0, qt_app._stillpoint_quick_capture_shortcut.refresh)
             window.show()
             phase_started_at = _record_startup_phase(
                 "window_show", phase_started_at, startup_started_at

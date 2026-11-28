@@ -1,4 +1,4 @@
-"""Global recording hotkeys; native registration, never a keyboard logger."""
+"""Native global hotkeys for recording and Quick Capture."""
 from __future__ import annotations
 
 import asyncio
@@ -15,6 +15,7 @@ from PySide6.QtGui import QGuiApplication
 START_BINDINGS = (("start", "R", "Start screen recording for the current page"),)
 BINDINGS = (("pause", "P", "Pause/resume screen recording"),
             ("stop", "S", "Stop screen recording and review"))
+RECORDING_HOTKEY_FALLBACK = "Use the recording bar or tray."
 PORTAL_APP_ID = "app.stillpoint.StillPoint"
 DEFAULT_DESCRIPTION = "Ctrl+Alt+Shift+P: pause/resume · Ctrl+Alt+Shift+S: stop/review"
 # CarbonEvents.h: kEventHotKeyPressed / kEventHotKeyReleased.
@@ -36,7 +37,10 @@ def _binding_description(sequence):
 
 def _portal_trigger(sequence):
     parts = _binding_description(sequence).split("+")
-    return "+".join([part.upper() for part in parts[:-1]] + [parts[-1].lower()])
+    modifiers = ["LOGO" if part.upper() == "META" else part.upper() for part in parts[:-1]]
+    key = parts[-1]
+    keysym = {"Space": "space", "Enter": "KP_Enter"}.get(key, key.lower() if len(key) == 1 else key)
+    return "+".join([*modifiers, keysym])
 
 
 class RecordingHotkeys(QObject):
@@ -44,12 +48,14 @@ class RecordingHotkeys(QObject):
     ready = Signal()
     statusChanged = Signal(str)
 
-    def __init__(self, parent=None, *, bindings=BINDINGS):
+    def __init__(self, parent=None, *, bindings=BINDINGS, fallback=RECORDING_HOTKEY_FALLBACK):
         super().__init__(parent)
         self._bindings = tuple(bindings)
+        self._fallback = fallback
         self.status = "Global shortcuts not registered"
         self._backend = None
         self._last_activation = {}
+        self.activation_token = ""
         self._open = False
 
     def start(self):
@@ -66,7 +72,7 @@ class RecordingHotkeys(QObject):
             elif sys.platform == "darwin":
                 self._backend = _MacHotkeys(self._dispatch, self._bindings)
             elif platform.startswith("wayland"):
-                self._backend = _PortalHotkeys(QCoreApplication.instance(), bindings=self._bindings)
+                self._backend = _PortalHotkeys(QCoreApplication.instance(), bindings=self._bindings, fallback=self._fallback)
                 self._backend.activated.connect(self._dispatch)
                 self._backend.registered.connect(self._registered)
                 self._backend.start()
@@ -75,12 +81,12 @@ class RecordingHotkeys(QObject):
                 self._backend = _X11Hotkeys(self._dispatch, self, self._bindings)
             else:
                 raise RuntimeError("this desktop has no supported global-shortcut backend")
-            labels = {"start": "start recording", "pause": "pause/resume", "stop": "stop/review"}
+            labels = {"start": "start recording", "pause": "pause/resume", "stop": "stop/review", "quick_capture": "Quick Capture"}
             description = " · ".join(f"{_binding_description(key)}: {labels.get(action, action)}" for action, key, _ in self._bindings)
             self._registered(description.replace("Ctrl+Alt", "Control+Option") if sys.platform == "darwin" else description)
         except Exception as exc:
             self.close()
-            self._registered(f"Global shortcuts unavailable: {exc}. Use the recording bar or tray.")
+            self._registered(f"Global shortcuts unavailable: {exc}. {self._fallback}")
 
     def _registered(self, status):
         if "unavailable" in status.lower() or "were revoked" in status.lower():
@@ -89,14 +95,18 @@ class RecordingHotkeys(QObject):
         self.statusChanged.emit(status)
         self.ready.emit()
 
-    def _dispatch(self, action):
+    def _dispatch(self, action, token=""):
         if not self._open or action not in {binding[0] for binding in self._bindings}:
             return
         now = time.monotonic()
         if now - self._last_activation.get(action, -1) < 0.4:
             return
         self._last_activation[action] = now
-        self.activated.emit(action)
+        self.activation_token = token
+        try:
+            self.activated.emit(action)
+        finally:
+            self.activation_token = ""
 
     def close(self):
         self._open = False
@@ -129,7 +139,8 @@ class _X11Hotkeys:
                 mods, letter = _binding_key(key)
                 modifiers = sum(mask for name, mask in (("CTRL", X.ControlMask), ("ALT", X.Mod1Mask),
                                                         ("SHIFT", X.ShiftMask), ("META", X.Mod4Mask)) if name in mods)
-                code = self._display.keysym_to_keycode(XK.string_to_keysym(letter.lower()))
+                keysym = _portal_trigger(key).rsplit("+", 1)[-1]
+                code = self._display.keysym_to_keycode(XK.string_to_keysym(keysym))
                 if not code:
                     raise RuntimeError(f"cannot find the {key} key on this keyboard")
                 self._keys[code] = action
@@ -193,11 +204,17 @@ class _WindowsHotkeys(QAbstractNativeEventFilter):
         self._installed = False
         try:
             for action, key, _ in bindings:
-                identifier = {"pause": 0x5350, "stop": 0x5351, "start": 0x5352, "capture": 0x5353}[action]
+                identifier = {"pause": 0x5350, "stop": 0x5351, "start": 0x5352, "capture": 0x5353, "quick_capture": 0x5354}[action]
                 mods, letter = _binding_key(key)
                 modifiers = sum(mask for name, mask in (("CTRL", 2), ("ALT", 1), ("SHIFT", 4), ("META", 8)) if name in mods)
-                vk = ord(letter.upper()) if len(letter) == 1 else 0
-                if not vk or not self._user32.RegisterHotKey(None, identifier, 0x4000 | modifiers, vk):
+                vk = {"SPACE": 0x20, "TAB": 0x09, "RETURN": 0x0D, "ENTER": 0x0D}.get(letter.upper(), 0)
+                if len(letter) == 1 and letter.isascii() and letter.isalnum():
+                    vk = ord(letter.upper())
+                elif letter.startswith("F") and letter[1:].isdigit() and 1 <= int(letter[1:]) <= 24:
+                    vk = 0x6F + int(letter[1:])
+                if not vk:
+                    raise RuntimeError(f"unsupported global shortcut key: {letter}")
+                if not self._user32.RegisterHotKey(None, identifier, 0x4000 | modifiers, vk):
                     raise RuntimeError(f"{_binding_description(key)} could not be registered (error {ctypes.get_last_error()})")
                 self._ids[identifier] = action
             QCoreApplication.instance().installNativeEventFilter(self)
@@ -266,7 +283,7 @@ class _MacHotkeys:
                 raise RuntimeError(f"could not install macOS hotkey handler ({result})")
             # Carbon uses the physical Control key, not Qt's Command mapping.
             for action, key, _ in bindings:
-                identifier = {"pause": 1, "stop": 2, "start": 3, "capture": 4}[action]
+                identifier = {"pause": 1, "stop": 2, "start": 3, "capture": 4, "quick_capture": 5}[action]
                 mods, letter = _binding_key(key)
                 codes = {"A": 0, "S": 1, "D": 2, "F": 3, "H": 4, "G": 5,
                          "Z": 6, "X": 7, "C": 8, "V": 9, "B": 11, "Q": 12,
@@ -274,10 +291,13 @@ class _MacHotkeys:
                          "1": 18, "2": 19, "3": 20, "4": 21, "6": 22, "5": 23,
                          "9": 25, "7": 26, "8": 28, "0": 29, "O": 31,
                          "U": 32, "I": 34, "P": 35, "L": 37, "J": 38,
-                         "K": 40, "N": 45, "M": 46}
+                         "K": 40, "N": 45, "M": 46, "SPACE": 49, "TAB": 48,
+                         "RETURN": 36, "ENTER": 36, "F1": 122, "F2": 120,
+                         "F3": 99, "F4": 118, "F5": 96, "F6": 97, "F7": 98,
+                         "F8": 100, "F9": 101, "F10": 109, "F11": 103, "F12": 111}
                 keycode = codes.get(letter.upper())
                 if keycode is None:
-                    raise RuntimeError("Unsupported capture shortcut key")
+                    raise RuntimeError(f"unsupported global shortcut key: {letter}")
                 modifiers = sum(mask for name, mask in (("CTRL", 4096), ("ALT", 2048), ("SHIFT", 512), ("META", 256)) if name in mods)
                 ref = pointer()
                 result = carbon.RegisterEventHotKey(keycode, modifiers,
@@ -301,7 +321,7 @@ class _MacHotkeys:
                 self._held.discard(identifier.id)
             elif kind == MAC_HOTKEY_PRESSED and identifier.id not in self._held:
                 self._held.add(identifier.id)
-                self._callback({1: "pause", 2: "stop", 3: "start", 4: "capture"}.get(identifier.id, ""))
+                self._callback({1: "pause", 2: "stop", 3: "start", 4: "capture", 5: "quick_capture"}.get(identifier.id, ""))
             return 0
         return -9874  # eventNotHandledErr
 
@@ -315,12 +335,13 @@ class _MacHotkeys:
 
 
 class _PortalHotkeys(QThread):
-    activated = Signal(str)
+    activated = Signal(str, str)
     registered = Signal(str)
 
-    def __init__(self, parent=None, *, bindings=BINDINGS):
+    def __init__(self, parent=None, *, bindings=BINDINGS, fallback=RECORDING_HOTKEY_FALLBACK):
         super().__init__(parent)
         self._bindings = tuple(bindings)
+        self._fallback = fallback
         self._loop = None
         self._task = None
         self._session = None
@@ -374,7 +395,7 @@ class _PortalHotkeys(QThread):
             entries = bound.value if bound is not None else []
             descriptions = {identifier: props.get("trigger_description") for identifier, props in entries}
             if not all(action in descriptions for action, _, _ in self._bindings):
-                raise RuntimeError("the desktop did not grant all requested recording shortcuts")
+                raise RuntimeError("the desktop did not grant all requested shortcuts")
             text = " · ".join(f"{descriptions[action].value if descriptions[action] else key}: {description}"
                               for action, key, description in self._bindings)
             self.registered.emit(text)
@@ -383,7 +404,7 @@ class _PortalHotkeys(QThread):
             pass
         except Exception as exc:
             detail = "the desktop shortcut prompt timed out" if isinstance(exc, TimeoutError) else str(exc) or type(exc).__name__
-            self.registered.emit(f"Global shortcuts unavailable: {detail}. Use the recording bar or tray.")
+            self.registered.emit(f"Global shortcuts unavailable: {detail}. {self._fallback}")
         finally:
             if bus is not None:
                 bus.disconnect()  # Portal closes all sessions owned by this connection.
@@ -419,7 +440,7 @@ class _PortalHotkeys(QThread):
             return
         if (message.interface == "org.freedesktop.DBus" and message.member == "NameOwnerChanged"
                 and message.body[0] == "org.freedesktop.portal.Desktop" and message.body[1]):
-            self.registered.emit("Global shortcuts unavailable: the desktop portal restarted. Use the recording bar or tray.")
+            self.registered.emit(f"Global shortcuts unavailable: the desktop portal restarted. {self._fallback}")
             if self._task is not None:
                 self._task.cancel()
         elif message.interface == "org.freedesktop.portal.Request" and message.member == "Response":
@@ -430,10 +451,11 @@ class _PortalHotkeys(QThread):
                 self._responses[message.path] = message.body
         elif (message.interface == "org.freedesktop.portal.GlobalShortcuts" and message.member == "Activated"
               and self._session and message.body[0] == self._session):
-            self.activated.emit(message.body[1])
+            token = message.body[3].get("activation_token")
+            self.activated.emit(message.body[1], token.value if token is not None else "")
         elif (message.interface == "org.freedesktop.portal.Session" and message.member == "Closed"
               and self._session and message.path == self._session):
-            self.registered.emit("Global shortcuts were revoked by the desktop. Use the recording bar or tray.")
+            self.registered.emit(f"Global shortcuts were revoked by the desktop. {self._fallback}")
             if self._task is not None:
                 self._task.cancel()
 

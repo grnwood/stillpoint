@@ -36,7 +36,6 @@ jobs:
         run: |
           python packaging/fetch_ripgrep.py
           pyinstaller -y --clean packaging/sp.spec
-          pyinstaller -y --clean packaging/stillpoint-capture.spec
 
       - name: Strip uneeded Qt stuff
         run: |
@@ -48,12 +47,11 @@ jobs:
           test -x dist/stillpoint/_internal/rg
           test -f dist/stillpoint/run-server.sh
           test -f dist/stillpoint/_launch.sh
-          test -x dist/stillpoint-capture/stillpoint-capture
 
       - name: Zip bundle
         run: |
           cd dist
-          zip -r ../StillPoint-linux-x86_64.zip stillpoint stillpoint-capture
+          zip -r ../StillPoint-linux-x86_64.zip stillpoint
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

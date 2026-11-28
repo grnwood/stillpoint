@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import json
-import re
 import sys
 import shutil
 
@@ -39,7 +38,7 @@ from PySide6.QtWidgets import (
     QFrame,
 )
 from pathlib import Path
-from PySide6.QtGui import QFontDatabase, QFont
+from PySide6.QtGui import QFontDatabase, QFont, QKeySequence
 from PySide6.QtWidgets import QApplication
 
 from sp.app import config
@@ -274,8 +273,10 @@ class PreferencesDialog(QDialog):
         self._update_quick_capture_custom_visibility()
 
         row_capture_hotkey = QHBoxLayout()
-        row_capture_hotkey.addWidget(QLabel("Quick Capture Hotkey (in-app):"))
+        row_capture_hotkey.addWidget(QLabel("Quick Capture Hotkey (global):"))
         self.quick_capture_hotkey_edit = QKeySequenceEdit()
+        self.quick_capture_hotkey_edit.setMaximumSequenceLength(1)
+        self.quick_capture_hotkey_edit.setToolTip("Works while StillPoint is running. Clear to disable.")
         self.quick_capture_hotkey_edit.setKeySequence(config.load_quick_capture_app_hotkey())
         row_capture_hotkey.addWidget(self.quick_capture_hotkey_edit, 1)
         general_layout.addLayout(row_capture_hotkey)
@@ -880,6 +881,8 @@ class PreferencesDialog(QDialog):
 
         mermaid_test_row = QHBoxLayout()
         self.mermaid_test_btn = QPushButton("Check Mermaid Rendering")
+        if sys.platform == "win32":
+            self.mermaid_test_btn.setToolTip("Check the built-in Mermaid preview renderer")
         self.mermaid_test_btn.clicked.connect(self._run_mermaid_test)
         self.mermaid_test_status = QLabel("Not checked")
         self.mermaid_test_status.setStyleSheet("color: #888;")
@@ -1159,7 +1162,7 @@ class PreferencesDialog(QDialog):
         self.mermaid_test_status.setStyleSheet("color: #888;")
         renderer = MermaidRenderer()
         mmdc_path = self.mermaid_mmdc_edit.text().strip()
-        if mmdc_path and not renderer.set_mmdc_path(mmdc_path):
+        if sys.platform != "win32" and mmdc_path and not renderer.set_mmdc_path(mmdc_path):
             self.mermaid_test_status.setText("Failed: CLI path is not a file")
             self.mermaid_test_status.setStyleSheet("color: #c00;")
             return
@@ -1272,6 +1275,13 @@ class PreferencesDialog(QDialog):
     
     def accept(self):
         """Save preferences when OK is clicked."""
+        from .quick_capture_shortcut import quick_capture_hotkey_error
+
+        hotkey = self.quick_capture_hotkey_edit.keySequence()
+        error = quick_capture_hotkey_error(hotkey)
+        if error:
+            QMessageBox.warning(self, "Quick Capture Hotkey", error)
+            return
         if not self.screen_capture_preferences.save():
             return
         self.audio_preferences.save()
@@ -1322,19 +1332,7 @@ class PreferencesDialog(QDialog):
         config.save_quick_capture_page_mode(capture_mode)
         config.save_quick_capture_custom_page(self.quick_capture_custom_edit.text())
         config.save_quick_capture_header(self.quick_capture_header_edit.text())
-        hotkey = self.quick_capture_hotkey_edit.keySequence().toString().strip()
-        if hotkey and re.match(r"^Alt\+[A-Za-z]$", hotkey):
-            QMessageBox.warning(
-                self,
-                "Quick Capture Hotkey",
-                "Alt+letter shortcuts are reserved for menu access and can be ambiguous.\n"
-                "Please choose a different shortcut.",
-            )
-            return
-        if not hotkey:
-            config.save_quick_capture_app_hotkey("")
-        else:
-            config.save_quick_capture_app_hotkey(hotkey)
+        config.save_quick_capture_app_hotkey(hotkey.toString(QKeySequence.PortableText))
         config.save_focus_mode_settings(
             {
                 "center_column": self.focus_center_column_checkbox.isChecked(),

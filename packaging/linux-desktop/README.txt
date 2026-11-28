@@ -49,14 +49,9 @@ Launch from:
 QUICK CAPTURE SHORTCUT (Linux)
 ------------------------------
 
-Use the screenshot to set up a custom shortcut:
-
-1. Open System Settings → Keyboard → Shortcuts → Custom Shortcuts
-2. Add a shortcut pointing to:
-   /usr/local/bin/stillpoint --quick-capture
-3. Assign a hotkey and save.
-
-See: packaging/linux-desktop/linux-quicklaunch-shortcut.png
+While StillPoint is running, press Ctrl+Alt+Space from any application.
+Change or clear the binding in StillPoint Preferences. On Wayland, approve
+the shortcut in the desktop portal if prompted.
 
 Quick Capture via stdin:
   echo "Idea..." | stillpoint --quick-capture

@@ -284,28 +284,13 @@ class MermaidRenderer:
 
         if _is_windows_platform():
             try:
-                from sp.app.mermaid_web_renderer import shared_mermaid_web_renderer
-
-                response = shared_mermaid_web_renderer().render_svg(
-                    self._prepare_mermaid_text(mermaid_text),
-                    theme=self._normalize_theme(theme, background_color),
+                result = self._render_web_svg(
+                    mermaid_text, theme, background_color, normalize_for_qtsvg
                 )
-                if response.get("ok") and response.get("svg"):
-                    svg_content = str(response["svg"])
-                    if normalize_for_qtsvg:
-                        svg_content = self._normalize_svg_for_qtsvg(svg_content)
-                    result = RenderResult(success=True, svg_content=svg_content)
-                    self._write_to_cache(cache_key, svg_content)
-                    result.duration_ms = (time.perf_counter() - t0) * 1000
-                    return result
-                return RenderResult(
-                    success=False,
-                    error_message="Mermaid render error",
-                    stderr="WebEngine renderer:\n" + str(
-                        response.get("details") or response.get("error") or "Unknown error"
-                    ),
-                    duration_ms=(time.perf_counter() - t0) * 1000,
-                )
+                if result.success and result.svg_content:
+                    self._write_to_cache(cache_key, result.svg_content)
+                result.duration_ms = (time.perf_counter() - t0) * 1000
+                return result
             except Exception as exc:
                 # Retain mmdc as a compatibility fallback, but do not make it
                 # the normal Windows interactive-preview backend.
@@ -332,6 +317,28 @@ class MermaidRenderer:
 
         result.duration_ms = (time.perf_counter() - t0) * 1000
         return result
+
+    def _render_web_svg(
+        self, text: str, theme: str, background_color: Optional[str], normalize: bool
+    ) -> RenderResult:
+        from sp.app.mermaid_web_renderer import shared_mermaid_web_renderer
+
+        response = shared_mermaid_web_renderer().render_svg(
+            self._prepare_mermaid_text(text),
+            theme=self._normalize_theme(theme, background_color),
+        )
+        if response.get("ok") and response.get("svg"):
+            svg = str(response["svg"])
+            if normalize:
+                svg = self._normalize_svg_for_qtsvg(svg)
+            return RenderResult(success=True, svg_content=svg)
+        return RenderResult(
+            success=False,
+            error_message="Mermaid render error",
+            stderr="WebEngine renderer:\n" + str(
+                response.get("details") or response.get("error") or "Unknown error"
+            ),
+        )
 
     def render_png(
         self,
@@ -388,7 +395,22 @@ class MermaidRenderer:
     def test_setup(self) -> RenderResult:
         """Run a tiny diagram render to validate configuration."""
         sample = "flowchart TD\n  A[Start] --> B[End]\n"
-        return self.render_png(sample)
+        if not _is_windows_platform():
+            return self.render_png(sample)
+
+        # Exercise the same renderer as the Windows preview, even if a previous
+        # check already rendered the sample.
+        t0 = time.perf_counter()
+        try:
+            result = self._render_web_svg(sample, "neutral", None, normalize=True)
+        except Exception as exc:
+            result = RenderResult(
+                success=False,
+                error_message="Mermaid WebEngine renderer unavailable",
+                stderr=str(exc),
+            )
+        result.duration_ms = (time.perf_counter() - t0) * 1000
+        return result
 
     def _invoke_mmdc(
         self,

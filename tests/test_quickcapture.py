@@ -245,3 +245,58 @@ def test_quickcapture_fallback_uses_destination_selected_in_overlay(
 
     assert quickcapture.run_quick_capture(vault=None, page=None, text=None) == 0
     assert captures == [("custom", ":Projects")]
+
+
+def test_in_app_overlay_restores_selected_vault_and_saves_there(qapp, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMainWindow
+
+    from sp.app import config
+    from sp.app.ui.main_window import MainWindow
+
+    class CaptureWindow(QMainWindow):
+        _show_quick_capture_overlay = MainWindow._show_quick_capture_overlay
+        _quick_capture_targets = MainWindow._quick_capture_targets
+        _resolve_quick_capture_target = MainWindow._resolve_quick_capture_target
+        _decode_vault_ref = MainWindow._decode_vault_ref
+        _quick_capture_vault_name = MainWindow._quick_capture_vault_name
+        _submit_quick_capture = MainWindow._submit_quick_capture
+        _quick_capture_fail = MainWindow._quick_capture_fail
+
+        def _open_quick_capture_receipt(self, _receipt):
+            pass
+
+    first = tmp_path / "First"
+    second = tmp_path / "Second"
+    first.mkdir()
+    second.mkdir()
+    monkeypatch.setattr(config, "GLOBAL_CONFIG", tmp_path / "config.json")
+    config.remember_vault(str(second))
+    config.save_quick_capture_page_mode("custom")
+    config.save_quick_capture_custom_page(":INBOX")
+    window = CaptureWindow()
+    window.vault_root = str(first)
+    window._remote_mode = False
+    window._read_only = False
+    assert not window.isVisible()
+
+    window._show_quick_capture_overlay()
+    overlay = qapp._stillpoint_quick_capture_overlay
+    assert overlay.isVisible()
+    assert overlay.vault_combo.currentData() == str(first)
+    overlay.vault_combo.setCurrentIndex(overlay.vault_combo.findData(str(second)))
+    overlay.vault_combo.activated.emit(overlay.vault_combo.currentIndex())
+    assert config.load_quick_capture_last_vault() == str(second)
+    overlay.reject()
+
+    window._show_quick_capture_overlay()
+    overlay = qapp._stillpoint_quick_capture_overlay
+    assert overlay.vault_combo.currentData() == str(second)
+    window._show_quick_capture_overlay()
+    assert qapp._stillpoint_quick_capture_overlay is overlay
+    previous_vault = config.get_active_vault()
+    overlay.input.setPlainText("A captured thought")
+    overlay._capture(close_after=True)
+    assert qapp._stillpoint_quick_capture_overlay is None
+    assert "A captured thought" in (second / "INBOX" / "INBOX.md").read_text(encoding="utf-8")
+    assert not (first / "INBOX").exists()
+    assert config.get_active_vault() == previous_vault

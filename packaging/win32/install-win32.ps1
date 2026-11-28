@@ -15,7 +15,6 @@ param(
 )
 
 $ExeName = "stillpoint.exe"
-$CaptureExeName = "stillpoint-capture.exe"
 
 # Base directory = folder where this script lives
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -27,9 +26,6 @@ $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $DistDir = $null
 $ExePathInDist = $null
 $AssetsDir = $null
-$CaptureDistDir = $null
-$CaptureExePath = $null
-$CaptureDistExists = $false
 
 # Try PyInstaller structure first (script in dist/ or same dir as exe)
 $PyInstallerExe = Join-Path $ScriptRoot $ExeName
@@ -38,11 +34,6 @@ if (Test-Path $PyInstallerExe) {
     $DistDir = $ScriptRoot
     $ExePathInDist = $PyInstallerExe
     $AssetsDir = Join-Path $ScriptRoot "_internal\sp\assets"
-    $CaptureDistDir = Join-Path $ScriptRoot "..\stillpoint-capture"
-    $CaptureDistExists = Test-Path $CaptureDistDir
-    if ($CaptureDistExists -and (Test-Path (Join-Path $CaptureDistDir $CaptureExeName))) {
-        $CaptureExePath = Join-Path $CaptureDistDir $CaptureExeName
-    }
 }
 # Try source build structure (dist/stillpoint/stillpoint.exe)
 elseif (Test-Path (Join-Path $ScriptRoot "..\..\dist\stillpoint\$ExeName")) {
@@ -54,11 +45,6 @@ elseif (Test-Path (Join-Path $ScriptRoot "..\..\dist\stillpoint\$ExeName")) {
     # Fallback: try relative to script root
     if (-not (Test-Path $AssetsDir)) {
         $AssetsDir = Join-Path $ScriptRoot "..\..\sp\assets"
-    }
-    $CaptureDistDir = Join-Path $ScriptRoot "..\..\dist\stillpoint-capture"
-    $CaptureDistExists = Test-Path $CaptureDistDir
-    if ($CaptureDistExists -and (Test-Path (Join-Path $CaptureDistDir $CaptureExeName))) {
-        $CaptureExePath = Join-Path $CaptureDistDir $CaptureExeName
     }
 }
 else {
@@ -209,7 +195,6 @@ if (-not (Test-Path $InstalledExe)) {
     Write-Host "Something went wrong: installed exe not found at $InstalledExe" -ForegroundColor Red
     exit 1
 }
-$InstalledCaptureExe = Join-Path $CaptureInstallDir $CaptureExeName
 
 # === COPY ICON INTO INSTALL DIR (if present) ===
 
@@ -230,18 +215,6 @@ if (Test-Path $FolderNavigatorIcon) {
     Copy-Item -Force $FolderNavigatorIcon $FolderNavigatorIconDest
 }
 
-# === COPY QUICK CAPTURE (if present) ===
-
-if ($CaptureDistExists) {
-    Write-Host " Copying Quick Capture to: $CaptureInstallDir"
-    if (-not (Test-Path $CaptureInstallDir)) {
-        New-Item -ItemType Directory -Path $CaptureInstallDir | Out-Null
-    }
-    Copy-Item -Recurse -Force (Join-Path $CaptureDistDir "*") $CaptureInstallDir
-} else {
-    Write-Host " Quick Capture dist folder not found at $CaptureDistDir" -ForegroundColor Yellow
-}
-
 # === CREATE START MENU SHORTCUT (USER ONLY) ===
 
 $StartMenuDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs"
@@ -256,7 +229,10 @@ $StartMenuShortcutPath = Join-Path $StartMenuDir $ShortcutName
 # once during migration and let the user pin the new Start Menu entry.
 foreach ($OldShortcut in @(
     $StartMenuShortcutPath,
-    (Join-Path $StartMenuDir "$AppName Quick Capture.lnk")
+    (Join-Path $StartMenuDir "$AppName Quick Capture.lnk"),
+    (Join-Path $StartMenuDir "$AppName Capture.lnk"),
+    (Join-Path ([Environment]::GetFolderPath("Desktop")) "$AppName Capture.lnk"),
+    (Join-Path ([Environment]::GetFolderPath("Desktop")) "$AppName Quick Capture.lnk")
 )) {
     Remove-Item -Force $OldShortcut -ErrorAction SilentlyContinue
 }
@@ -292,20 +268,6 @@ $FolderNavigatorShortcut.IconLocation = $FolderNavigatorIconDest
 $FolderNavigatorShortcut.Save()
 Write-Host " Folder Navigator shortcut created: $FolderNavigatorShortcutPath"
 
-# Quick Capture shortcut (Start Menu only)
-if (Test-Path $InstalledCaptureExe) {
-    $CaptureShortcutPath = Join-Path $StartMenuDir "$AppName Quick Capture.lnk"
-    $CaptureShortcut = $WshShell.CreateShortcut($CaptureShortcutPath)
-    $CaptureShortcut.TargetPath = $InstalledCaptureExe
-    $CaptureShortcut.WorkingDirectory = $CaptureInstallDir
-    $CaptureShortcut.WindowStyle = 1
-    $CaptureShortcut.IconLocation = $IconDest
-    $CaptureShortcut.Save()
-    Write-Host " Quick Capture shortcut created: $CaptureShortcutPath"
-} else {
-    Write-Host " Quick Capture exe not found at $InstalledCaptureExe" -ForegroundColor Yellow
-}
-
 # === OPTIONAL DESKTOP SHORTCUT (USER ONLY) ===
 
 if ($CreateDesktopShortcut) {
@@ -333,22 +295,6 @@ if ($CreateDesktopShortcut) {
     $FolderNavigatorDesktopShortcut.IconLocation = $FolderNavigatorIconDest
     $FolderNavigatorDesktopShortcut.Save()
     Write-Host " Desktop Folder Navigator shortcut created: $FolderNavigatorDesktopShortcutPath"
-
-    if (Test-Path $InstalledCaptureExe) {
-        $QuickCaptureShortcutName = "$AppName Quick Capture.lnk"
-        $QuickCaptureShortcutPath = Join-Path $DesktopDir $QuickCaptureShortcutName
-
-        $QuickCaptureShortcut = $WshShell.CreateShortcut($QuickCaptureShortcutPath)
-        $QuickCaptureShortcut.TargetPath = $InstalledCaptureExe
-        $QuickCaptureShortcut.WorkingDirectory = $CaptureInstallDir
-        $QuickCaptureShortcut.WindowStyle = 1
-        $QuickCaptureShortcut.IconLocation = $IconDest
-        $QuickCaptureShortcut.Save()
-
-        Write-Host " Desktop quick capture shortcut created: $QuickCaptureShortcutPath"
-    } else {
-        Write-Host " Quick capture exe not found at $InstalledCaptureExe" -ForegroundColor Yellow
-    }
 }
 
 Write-Host ""

@@ -35,6 +35,8 @@ def test_inno_shortcuts_only_target_the_canonical_bundle() -> None:
     assert "StillPoint Folder Navigator" in script
     assert 'Parameters: "--folder-navigator"' in script
     assert "FolderNavigator.ico" in script
+    assert all("stillpoint-capture" not in line for line in stillpoint_icons)
+    assert not any(line.startswith("Source:") and "stillpoint-capture" in line for line in script.splitlines())
 
 
 def test_powershell_installer_matches_and_replaces_the_canonical_layout() -> None:
@@ -42,7 +44,8 @@ def test_powershell_installer_matches_and_replaces_the_canonical_layout() -> Non
 
     assert '"Programs\\$AppName"' in script
     assert 'Join-Path $InstallDir "stillpoint"' in script
-    assert 'Join-Path $ScriptRoot "..\\stillpoint-capture"' in script
+    assert "$CaptureDistDir" not in script
+    assert "$InstalledCaptureExe" not in script
     assert "Remove-InstalledPath $MainInstallDir" in script
     assert "Remove-InstalledPath $CaptureInstallDir" in script
     assert "Remove-InstalledPath $LegacyInnoDir" in script

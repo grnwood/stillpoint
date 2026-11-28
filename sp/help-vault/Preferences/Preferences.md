@@ -32,11 +32,11 @@ Preferences let you shape StillPoint to your workflow: what features are on, how
 Note: Feature toggles may require reopening the vault or restarting the app.
 
 ### Capture
-- **Home Quick Capture Vault**: Where tray-based quick captures are written.
+- **Home Quick Capture Vault**: The initial vault for Quick Capture. The picker remembers your last selection.
 - **Default Capture Page**: Choose between `Today Journal Page` and `Custom Page`.
 - **Custom Page**: Enter a page name or a path-like name.
 - **Quick Capture heading**: Sets the shared heading used for captures (`QuickCaptures` by default). Repeated captures reuse this section.
-- **Quick Capture Hotkey (in-app)**: Keyboard shortcut for quick capture inside StillPoint.
+- **Quick Capture Hotkey (global)**: Open Quick Capture from any application while StillPoint is running. Defaults to Ctrl+Alt+Space (macOS Control+Option+Space). Clear the binding to disable it.
 
 ## Appearance
 ### Fonts
@@ -169,4 +169,4 @@ Use **Use Global Defaults** to reset the accent color and three-state overrides 
 
 Choose the default microphone, recording format, and playback volume. For optional transcription, choose a transcription server, speech-to-text model, and endpoint. Transcription sends the selected audio recording to that server. See [:Recording|Voice Notes and Screen Recording] for recording and playback instructions.
 
-Screen-recording bar visibility and its dragged position are remembered from the recorder and tray controls. The last screen and microphone choices are also remembered. The global Start shortcut stays registered while StillPoint is running; pause/stop shortcuts are registered during recording. They are separate from the in-app Quick Capture hotkey.
+Screen-recording bar visibility and its dragged position are remembered from the recorder and tray controls. The last screen and microphone choices are also remembered. The global Start shortcut stays registered while StillPoint is running; pause/stop shortcuts are registered during recording. They are separate from the Quick Capture hotkey.

@@ -273,7 +273,10 @@ class ScreenCaptureOverlay(QWidget):
         self.brush_size_label.setText(f"{width} px")
         self.brush_size_label.setToolTip("Ctrl/Cmd+scroll to change brush size")
         self.brush_size_label.setVisible(self.tool in ("Highlight", "Pixelate"))
-        self.toolbar.adjustSize()
+        if self._selected:
+            self._position_toolbar()
+        else:
+            self.toolbar.adjustSize()
 
     def _brush_bounds(self):
         if (self.tool not in ("Highlight", "Pixelate") or not self._selected
@@ -690,12 +693,34 @@ class ScreenCaptureOverlay(QWidget):
         elif self.selection.width() >= 3 and self.selection.height() >= 3:
             self._selected = True
             self.hint.hide()
-            self.toolbar.adjustSize()
-            self.toolbar.move(max(0, min(self.selection.left(), self.width()-self.toolbar.width())),
-                              max(0, min(self.selection.bottom()+8, self.height()-self.toolbar.height())))
+            self._position_toolbar()
             self.toolbar.show()
         self._anchor = None
         self.update()
+
+    def _position_toolbar(self):
+        self.toolbar.adjustSize()
+        selection = self.selection
+        width, height = self.toolbar.width(), self.toolbar.height()
+        gap = 8
+        # Try the side facing away from the nearest display edge first.
+        candidates = (
+            (selection.top(), selection.left(), selection.bottom() + 1 + gap),
+            (self.height() - selection.bottom() - 1, selection.left(), selection.top() - height - gap),
+            (selection.left(), selection.right() + 1 + gap, selection.top()),
+            (self.width() - selection.right() - 1, selection.left() - width - gap, selection.top()),
+        )
+        max_x, max_y = max(0, self.width() - width), max(0, self.height() - height)
+        positions = [
+            QPoint(min(max(x, 0), max_x), min(max(y, 0), max_y))
+            for _, x, y in sorted(candidates, key=lambda candidate: candidate[0])
+        ]
+
+        def overlap(position):
+            intersection = selection.intersected(QRect(position, self.toolbar.size()))
+            return intersection.width() * intersection.height()
+
+        self.toolbar.move(min(positions, key=overlap))
 
     def rendered_image(self):
         self._finish_text()

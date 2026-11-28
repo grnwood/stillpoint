@@ -19,7 +19,7 @@ StillPoint is a local-first, markdown note system with a PySide6 desktop app and
 
 <img src="docs/img/calendar-page.png"/>
 
-- Quick Capture (tray/menu/CLI) for low-friction capture into today's page.
+- Quick Capture (global hotkey, Tools menu, or CLI) for low-friction capture into today's page.
 - Voice notes and screen recordings saved as page attachments, with playback, optional audio transcription, tray recording controls, and global screen-recording pause/stop shortcuts.
 - Focus and Audience modes for distraction-free writing and reading.
 - Link graph / navigator and filtered navigation for working in a project context.
@@ -431,12 +431,6 @@ platform, verifies its SHA-256 digest, and stages it for the desktop bundle.
 
 Artifacts land in `dist/stillpoint/`.
 
-Lite Quick Capture build:
-
-```bash
-pyinstaller -y packaging/stillpoint-capture.spec
-```
-
 ## Install into OS
 If you want to install fully into the OS there are some helper scripts in packaging/
 
@@ -469,39 +463,17 @@ You can now launch it from: Menu → Accessories → StillPoint
 Or run from terminal: stillpoint
 ```
 
-## Quick Capture Shortcuts
+## Quick Capture
 
-PyInstaller builds include a `stillpoint` executable that also supports Quick Capture via flags.
-The same entry point works for overlay capture or text capture via `--text`/stdin, and can target a specific vault/page.
+While StillPoint is running, press **Ctrl+Alt+Space** (macOS **Control+Option+Space**) to open Quick Capture from any application. Change or clear the binding in **Preferences → Quick Capture Hotkey (global)**. On Wayland, approve the shortcut in the desktop portal if prompted.
 
-### Linux (Cinnamon)
-- Open **System Settings → Keyboard → Shortcuts → Custom Shortcuts**.
-- Add a shortcut with the command:
-  - `"/path/to/stillpoint/stillpoint" --quick-capture`
-- stdin capture:
-  - `echo "Idea..." | /path/to/stillpoint/stillpoint --quick-capture`
-- specific vault/page:
-  - `/path/to/stillpoint/stillpoint --quick-capture --vault /path/to/vault --page :Projects:Ideas --text "Idea..."`
-- Assign your preferred key combo.
+Choose a vault and destination in the capture window. StillPoint remembers the last vault you picked across app restarts. You can also open Quick Capture from the **Tools** menu.
 
-### Windows
-- Find `stillpoint.exe` inside the installed StillPoint folder.
-- Create a desktop shortcut with:
-  - `"C:\Path\To\stillpoint\stillpoint.exe" --quick-capture`
-- Optional stdin capture (PowerShell):
-  - `echo "Idea..." | "C:\Path\To\stillpoint\stillpoint.exe" --quick-capture`
-- specific vault/page:
-  - `"C:\Path\To\stillpoint\stillpoint.exe" --quick-capture --vault "D:\Vaults\MyVault" --page :Projects:Ideas --text "Idea..."`
-- Assign a Shortcut key in **Properties**.
+Scripts can still send text to the main StillPoint executable:
 
-### macOS
-- Create an Automator “Quick Action” or Shortcut that runs:
-  - `/Applications/StillPoint.app/Contents/MacOS/stillpoint --quick-capture`
-- stdin capture:
-  - `echo "Idea..." | /Applications/StillPoint.app/Contents/MacOS/stillpoint --quick-capture`
-- specific vault/page:
-  - `/Applications/StillPoint.app/Contents/MacOS/stillpoint --quick-capture --vault /path/to/vault --page :Projects:Ideas --text "Idea..."`
-- Assign a keyboard shortcut to that action in **System Settings → Keyboard → Keyboard Shortcuts**.
+```bash
+stillpoint --quick-capture --vault /path/to/vault --page :Projects:Ideas --text "Idea..."
+```
 
 ## Repo Layout
 

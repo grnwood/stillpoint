@@ -50,7 +50,6 @@ fi
 for required_file in \
   "../../sp/requirements.txt" \
   "../../packaging/sp-macos.spec" \
-  "../../packaging/stillpoint-capture.spec" \
   "../../packaging/macos/README.txt" \
   "../../packaging/macos/stillpoint.sh"; do
   if [[ ! -f "$required_file" ]]; then
@@ -72,9 +71,7 @@ OUTPUT_DIR="dist"
 ZIP_PATH="$OUTPUT_DIR/StillPoint-macOS.zip"
 DMG_PATH="$OUTPUT_DIR/StillPoint-macOS.dmg"
 MAIN_APP="$OUTPUT_DIR/StillPoint.app"
-CAPTURE_OUTPUT="$OUTPUT_DIR/stillpoint-capture"
 FOLDER_NAV_APP="$OUTPUT_DIR/StillPoint Folder Navigator.app"
-QUICK_CAPTURE_APP="$OUTPUT_DIR/StillPoint Quick Capture.app"
 BUNDLE_DIR="$OUTPUT_DIR/bundle"
 
 echo "Building StillPoint ${STILLPOINT_VERSION}"
@@ -98,22 +95,15 @@ fi
 
 "$VENV_PYTHON" ../../packaging/fetch_ripgrep.py
 "$VENV_DIR/bin/pyinstaller" -y --clean --distpath "$OUTPUT_DIR" ../../packaging/sp-macos.spec
-"$VENV_DIR/bin/pyinstaller" -y --clean --distpath "$OUTPUT_DIR" ../../packaging/stillpoint-capture.spec
 
 ../../packaging/macos/build-folder-navigator-app.sh "$OUTPUT_DIR" "$STILLPOINT_VERSION"
-../../packaging/macos/build-quick-capture-app.sh "$OUTPUT_DIR" "$STILLPOINT_VERSION"
 FOLDER_NAV_EXECUTABLE="$FOLDER_NAV_APP/Contents/MacOS/stillpoint-folder-navigator"
-QUICK_CAPTURE_EXECUTABLE="$QUICK_CAPTURE_APP/Contents/MacOS/stillpoint-quick-capture"
 
 test -d "$MAIN_APP"
 test -d "$FOLDER_NAV_APP"
 test -x "$FOLDER_NAV_EXECUTABLE"
-test -d "$QUICK_CAPTURE_APP"
-test -x "$QUICK_CAPTURE_EXECUTABLE"
-test -x "$QUICK_CAPTURE_APP/Contents/Resources/stillpoint-capture/stillpoint-capture"
 test -f "$MAIN_APP/Contents/Info.plist"
 test -x "$MAIN_APP/Contents/MacOS/StillPoint"
-test -x "$CAPTURE_OUTPUT/stillpoint-capture"
 test -x ../../packaging/macos/stillpoint.sh
 
 MAIN_BINARY_TYPE="$(file "$MAIN_APP/Contents/MacOS/StillPoint")"
@@ -138,8 +128,6 @@ rm -rf "$BUNDLE_DIR"
 mkdir -p "$BUNDLE_DIR"
 cp -R "$MAIN_APP" "$BUNDLE_DIR/"
 cp -R "$FOLDER_NAV_APP" "$BUNDLE_DIR/"
-cp -R "$QUICK_CAPTURE_APP" "$BUNDLE_DIR/"
-cp -R "$CAPTURE_OUTPUT" "$BUNDLE_DIR/"
 cp ../../packaging/macos/README.txt "$BUNDLE_DIR/README.txt"
 cp ../../packaging/macos/stillpoint.sh "$BUNDLE_DIR/stillpoint.sh"
 test -x "$BUNDLE_DIR/stillpoint.sh"
@@ -154,8 +142,6 @@ if (( BUILD_DMG )); then
   mkdir -p "$DMG_STAGE"
   cp -R "$MAIN_APP" "$DMG_STAGE/"
   cp -R "$FOLDER_NAV_APP" "$DMG_STAGE/"
-  cp -R "$QUICK_CAPTURE_APP" "$DMG_STAGE/"
-  cp -R "$CAPTURE_OUTPUT" "$DMG_STAGE/"
   cp ../../packaging/macos/README.txt "$DMG_STAGE/README.txt"
   cp ../../packaging/macos/stillpoint.sh "$DMG_STAGE/stillpoint.sh"
   test -x "$DMG_STAGE/stillpoint.sh"

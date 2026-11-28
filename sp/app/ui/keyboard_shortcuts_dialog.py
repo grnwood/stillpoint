@@ -5,6 +5,8 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import QDialog, QGridLayout, QHBoxLayout, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
+from sp.app import config
+
 from .keyboard_shortcuts import history_cycle_sequences, vi_navigation_sequences
 from .recording_hotkeys import BINDINGS, START_BINDINGS
 from .screen_capture import ACTION_KEYS, TOOL_KEYS
@@ -189,6 +191,9 @@ class KeyboardShortcutsDialog(QDialog):
             (label if name != "start" else "Start screen recording", f"{modifier}+Alt+Shift+{key}", "")
             for name, key, label in (*START_BINDINGS, *BINDINGS)
         ]
+        capture_key = config.load_quick_capture_app_hotkey()
+        if capture_key:
+            groups["Quick Capture · global"] = [("Open Quick Capture", _native_keys(capture_key), "")]
         menu_rows = _menu_shortcuts(parent)
         if menu_rows:
             groups["Menu actions · current bindings"] = menu_rows

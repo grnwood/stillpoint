@@ -3457,7 +3457,7 @@ class MainWindow(QMainWindow):
         open_templates_action.triggered.connect(self._open_user_templates_folder)
         vault_menu.addAction(open_templates_action)
         self._action_quick_capture = QAction("Quick Capture...", self)
-        self._action_quick_capture.setToolTip("Capture a thought into your home vault")
+        self._action_quick_capture.setToolTip("Capture a thought into the selected vault")
         self._action_quick_capture.triggered.connect(self._show_quick_capture_overlay)
         vault_menu.addSeparator()
         search_vault_action = QAction("Search Across Vault...", self)
@@ -3761,7 +3761,6 @@ class MainWindow(QMainWindow):
         self._apply_menu_bar_theme_styles()
 
         self._register_shortcuts()
-        self._setup_quick_capture_shortcut(show_error=False)
         from .recording_hotkeys import register_recording_start_shortcut
         register_recording_start_shortcut(self)
         self._setup_screen_capture_shortcut()
@@ -4909,74 +4908,6 @@ class MainWindow(QMainWindow):
     def _run_command_bar_action(self, action: QAction) -> None:
         if action.isEnabled():
             action.trigger()
-
-    def _quick_capture_shortcut_conflicts(self, sequence: QKeySequence) -> list[str]:
-        if sequence.isEmpty():
-            return []
-        conflicts = []
-        seen = set()
-        app = QApplication.instance()
-        widgets = app.topLevelWidgets() if app is not None else [self]
-        for widget in widgets:
-            for action in widget.findChildren(QAction):
-                if action is getattr(self, "_action_quick_capture", None):
-                    continue
-                for seq in action.shortcuts():
-                    if not seq.isEmpty() and seq == sequence:
-                        label = action.text().replace("&", "").strip() or "Unnamed action"
-                        key = f"action:{label}"
-                        if key not in seen:
-                            conflicts.append(label)
-                            seen.add(key)
-                        break
-            for sc in widget.findChildren(QShortcut):
-                if sc.key() == sequence:
-                    label = sc.objectName() or "Shortcut"
-                    key = f"shortcut:{label}"
-                    if key not in seen:
-                        conflicts.append(label)
-                        seen.add(key)
-        return conflicts
-
-    def _is_ambiguous_alt_letter(self, sequence: QKeySequence) -> bool:
-        text = sequence.toString(QKeySequence.NativeText).strip()
-        return bool(re.match(r"^Alt\+[A-Za-z]$", text))
-
-    def _setup_quick_capture_shortcut(self, *, show_error: bool) -> None:
-        if not hasattr(self, "_action_quick_capture"):
-            return
-        hotkey = config.load_quick_capture_app_hotkey()
-        sequence = QKeySequence(hotkey)
-        if not hotkey.strip() or sequence.isEmpty():
-            self._action_quick_capture.setShortcut(QKeySequence())
-            return
-        if self._is_ambiguous_alt_letter(sequence):
-            self._action_quick_capture.setShortcut(QKeySequence())
-            if show_error:
-                QMessageBox.warning(
-                    self,
-                    "Quick Capture Hotkey",
-                    "Alt+letter shortcuts are reserved for menu access and can be ambiguous.\n"
-                    "Please choose a different shortcut.",
-                )
-            return
-        conflicts = self._quick_capture_shortcut_conflicts(sequence)
-        if conflicts:
-            self._action_quick_capture.setShortcut(QKeySequence())
-            if show_error:
-                conflict_list = ", ".join(conflicts[:5])
-                extra = f" (+{len(conflicts) - 5} more)" if len(conflicts) > 5 else ""
-                QMessageBox.warning(
-                    self,
-                    "Quick Capture Hotkey",
-                    "That shortcut conflicts with another command and was not applied.\n"
-                    f"Conflicts: {conflict_list}{extra}",
-                )
-            return
-        self._action_quick_capture.setShortcut(sequence)
-        self._action_quick_capture.setShortcutContext(Qt.ApplicationShortcut)
-        if self._action_quick_capture not in self.actions():
-            self.addAction(self._action_quick_capture)
 
     def _build_format_menu(self) -> None:
         """Add a Format menu that mirrors markdown styling shortcuts."""
@@ -18151,7 +18082,9 @@ class MainWindow(QMainWindow):
                 self.update_links_on_index = config.load_update_links_on_index()
             except Exception:
                 self.update_links_on_index = True
-            self._setup_quick_capture_shortcut(show_error=True)
+            capture_shortcut = getattr(QApplication.instance(), "_stillpoint_quick_capture_shortcut", None)
+            if capture_shortcut is not None:
+                capture_shortcut.refresh()
             self._setup_screen_capture_shortcut()
             self._update_periodic_search_sync_timer()
         try:
@@ -18867,14 +18800,24 @@ class MainWindow(QMainWindow):
                 bar.setValue(max(0, min(original_scroll, bar.maximum())))
 
     def _show_quick_capture_overlay(self) -> None:
-        target, reason = self._resolve_quick_capture_target()
-        if not target:
+        app = QApplication.instance()
+        existing = getattr(app, "_stillpoint_quick_capture_overlay", None)
+        if existing is not None:
+            existing.raise_()
+            existing.activateWindow()
+            existing.input.setFocus()
+            return
+
+        targets = self._quick_capture_targets()
+        if not targets:
+            _, reason = self._resolve_quick_capture_target()
             print("[QuickCapture] UI overlay aborted: no capture target resolved.")
             self._show_quick_capture_unavailable(reason)
             if reason:
                 self._quick_capture_fail(reason)
             return
-        print(f"[QuickCapture] UI overlay target resolved: {target}")
+        selected_vault = next(iter(targets))
+        target = targets[selected_vault]
 
         def _on_capture(text: str, attachments: list[dict], _vault_path: Optional[str]) -> dict:
             return _on_capture_with_destination(text, attachments, _vault_path, selected_destination)
@@ -18891,7 +18834,9 @@ class MainWindow(QMainWindow):
             _vault_path: Optional[str],
             destination: dict[str, Any],
         ) -> dict:
-            capture_target = dict(target)
+            capture_target = dict(targets[_vault_path or selected_vault])
+            if capture_target["kind"] == "local" and not Path(capture_target["vault_path"]).is_dir():
+                return {"ok": False, "error": "The selected vault is no longer available."}
             capture_target["page_mode"] = destination.get("page_mode") or "today"
             capture_target["page_ref"] = destination.get("page_ref")
             receipt = self._submit_quick_capture(text, capture_target, attachments)
@@ -18911,30 +18856,43 @@ class MainWindow(QMainWindow):
                     "page_ref": str(capture_target.get("page_ref") or ""),
                 }
             )
+            config.save_quick_capture_last_vault(_vault_path or selected_vault)
             config.add_quick_capture_history(receipt)
             return receipt
 
         def _on_undo(capture_id: str) -> dict:
-            if target.get("kind") != "local":
-                return {"ok": False, "error": "Remote captures cannot be undone from this window."}
             from sp.app import quickcapture as qc
 
             return qc._undo_file_capture(capture_id)
 
-        subtitle = self._quick_capture_subtitle(target)
         overlay = QuickCaptureOverlay(
-            parent=self,
+            parent=None,
             on_capture=_on_capture,
-            subtitle=subtitle,
+            vault_options=[
+                {"name": self._quick_capture_vault_name(item), "path": ref}
+                for ref, item in targets.items()
+            ],
+            selected_vault=selected_vault,
             destination_options=destination_options,
             selected_destination=selected_destination,
             on_capture_with_destination=_on_capture_with_destination,
-            on_undo=_on_undo if target.get("kind") == "local" else None,
+            on_undo=_on_undo,
             on_open_capture=self._open_quick_capture_receipt,
             capture_history=config.load_quick_capture_history(),
         )
+        app._stillpoint_quick_capture_overlay = overlay
+        overlay.setProperty("_sp_owner", self)
+        overlay.setAttribute(Qt.WA_DeleteOnClose)
+        overlay.finished.connect(lambda: setattr(app, "_stillpoint_quick_capture_overlay", None))
+        self.destroyed.connect(overlay.close)
+        overlay.vault_combo.activated.connect(
+            lambda: config.save_quick_capture_last_vault(overlay.vault_combo.currentData())
+        )
         overlay.adjustSize()
-        geo = self.frameGeometry()
+        screen = QGuiApplication.screenAt(QCursor.pos()) or self.screen()
+        geo = screen.availableGeometry()
+        overlay.winId()
+        overlay.windowHandle().setScreen(screen)
         pos = geo.center() - overlay.rect().center()
         pos.setY(pos.y() - int(geo.height() * 0.1))
         overlay.move(pos)
@@ -18943,15 +18901,56 @@ class MainWindow(QMainWindow):
         overlay.activateWindow()
         overlay.input.setFocus()
 
-    def _resolve_quick_capture_target(self) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+    def _quick_capture_targets(self) -> dict[str, dict[str, Any]]:
+        app = QApplication.instance()
+        windows = [self, *getattr(app, "_stillpoint_windows", ())]
+        current = {}
+        for window in windows:
+            if not window.vault_root:
+                continue
+            ref = (
+                window._encode_remote_ref(window.api_base, window._remote_vault_ref_path or window.vault_root)
+                if window._remote_mode else str(window.vault_root)
+            )
+            current[ref] = window
+
+        # Include vaults opened by other StillPoint processes via shared settings.
+        remote_refs = (
+            self._encode_remote_ref(f"{server['scheme']}://{server['host']}:{server['port']}", path)
+            for server in config.load_remote_servers()
+            for path in server["selected_vaults"]
+        )
+        refs = dict.fromkeys(ref for ref in (
+            config.load_quick_capture_last_vault(),
+            config.load_quick_capture_vault(),
+            *current,
+            config.load_last_vault(),
+            *(entry["path"] for entry in config.load_known_vaults()),
+            *remote_refs,
+            *(entry.get("path") for entry in config.load_homebase_vault_profiles()),
+        ) if ref)
+        targets = {}
+        for ref in refs:
+            target, _ = current.get(ref, self)._resolve_quick_capture_target(vault_ref=ref)
+            if target is not None:
+                targets[ref] = target
+        return targets
+
+    def _resolve_quick_capture_target(self, *, vault_ref: Optional[str] = None) -> tuple[Optional[dict[str, Any]], Optional[str]]:
         page_mode = config.load_quick_capture_page_mode()
         page_ref = config.load_quick_capture_custom_page() if page_mode == "custom" else None
         if page_mode == "custom" and not page_ref:
             return None, "Custom capture page is enabled but not configured."
 
-        home_vault = config.load_quick_capture_vault()
+        home_vault = vault_ref or config.load_quick_capture_vault()
         if home_vault:
             kind, server_url, remote_path = self._decode_vault_ref(home_vault)
+            if kind == "homebase":
+                from sp.app.quickcapture_lite import _resolve_homebase_ref_to_path
+
+                home_vault = _resolve_homebase_ref_to_path(home_vault)
+                if not home_vault:
+                    return None, "The Homebase vault is unavailable."
             if kind == "remote" and server_url and remote_path:
                 if (
                     self._remote_mode
@@ -18968,8 +18967,8 @@ class MainWindow(QMainWindow):
                     "page_ref": page_ref,
                 }, None
             vault_root = Path(home_vault).expanduser()
-            if not vault_root.exists():
-                return None, f"Home vault does not exist: {home_vault}"
+            if not vault_root.is_dir():
+                return None, f"Vault does not exist: {home_vault}"
             if self.vault_root and Path(self.vault_root).expanduser().resolve() == vault_root.resolve() and self._read_only:
                 return None, "Target local vault is read-only."
             if not os.access(vault_root, os.W_OK):
@@ -19114,7 +19113,9 @@ class MainWindow(QMainWindow):
                 vault_root = Path(target.get("vault_path") or "")
                 page_mode = target.get("page_mode") or "today"
                 page_ref = target.get("page_ref")
-                result = qc._capture_to_files_result(vault_root, page_mode, page_ref, text, attachments)
+                result = qc._capture_to_files_result(
+                    vault_root, page_mode, page_ref, text, attachments, scoped=True
+                )
                 self.statusBar().showMessage("Quick Capture saved.", 3000)
                 return result
             except Exception as exc:
@@ -19184,15 +19185,14 @@ class MainWindow(QMainWindow):
             return
         self._open_file(path, add_to_history=True, force=True)
 
-    def _quick_capture_subtitle(self, target: dict[str, Any]) -> str:
+    def _quick_capture_vault_name(self, target: dict[str, Any]) -> str:
         vault_path = target.get("vault_path") or ""
         vault_name = Path(vault_path).name or vault_path
         if target.get("kind") == "remote":
             server_url = str(target.get("server_url") or "")
             if server_url:
                 vault_name = f"{vault_name} @ {self._format_remote_host(server_url)}"
-        current_name = Path(self.vault_root).name if self.vault_root else vault_name
-        return f"Vault: {vault_name if config.load_quick_capture_vault() else current_name}"
+        return vault_name
 
         try:
             self._main_soft_scroll_lines = config.load_main_soft_scroll_lines(5)
@@ -27648,6 +27648,9 @@ class MainWindow(QMainWindow):
         # macOS, Command-Q may otherwise deliver a final expose event while the
         # document layout or syntax highlighter is entering teardown.
         self.setProperty("_sp_closing", True)
+        capture_overlay = getattr(QApplication.instance(), "_stillpoint_quick_capture_overlay", None)
+        if capture_overlay is not None and capture_overlay.property("_sp_owner") is self:
+            capture_overlay.close()
         self._checkpoint_current_recovery_draft("window close")
         try:
             if getattr(self, "editor", None):
@@ -27744,17 +27747,7 @@ class MainWindow(QMainWindow):
             if not owner:
                 return False
             print("[QuickCapture] UI hook invoked; showing overlay in running app.")
-            def _focus_and_show() -> None:
-                try:
-                    if owner.isMinimized():
-                        owner.showNormal()
-                    owner.show()
-                    owner.raise_()
-                    owner.activateWindow()
-                except Exception:
-                    pass
-                owner._show_quick_capture_overlay()
-            QTimer.singleShot(0, owner, _focus_and_show)
+            QTimer.singleShot(0, owner, owner._show_quick_capture_overlay)
             return True
 
         api_module.set_ui_quick_capture_hook(_show_capture)

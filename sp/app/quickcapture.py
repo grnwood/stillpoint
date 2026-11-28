@@ -274,10 +274,25 @@ def _capture_to_files_result(
     page_ref: Optional[str],
     text: str,
     attachments: Optional[list[dict]] = None,
+    *,
+    scoped: bool = False,
 ) -> dict:
     vault_root = validate_vault_root(vault_root)
     config.init_settings()
-    config.set_active_vault(str(vault_root))
+    if not scoped:
+        config.set_active_vault(str(vault_root))
+        return _write_file_capture(vault_root, page_mode, page_ref, text, attachments)
+    token = config.push_active_vault_context(str(vault_root))
+    try:
+        return _write_file_capture(vault_root, page_mode, page_ref, text, attachments)
+    finally:
+        config.reset_active_vault_context(token)
+
+
+def _write_file_capture(
+    vault_root: Path, page_mode: str, page_ref: Optional[str], text: str,
+    attachments: Optional[list[dict]],
+) -> dict:
     if page_mode == "today":
         target, _created = files.ensure_journal_today(vault_root, template=None)
         rel_path = f"/{target.relative_to(vault_root).as_posix()}"

@@ -187,7 +187,7 @@ def test_wayland_portal_uses_granted_bindings_and_disconnects_session(qapp, monk
     portal = hotkeys._PortalHotkeys(bindings=requested)
     statuses, actions = [], []
     portal.registered.connect(statuses.append)
-    portal.activated.connect(actions.append)
+    portal.activated.connect(lambda action, _token: actions.append(action))
 
     class Bus:
         def __init__(self):
@@ -329,3 +329,20 @@ def test_windows_capture_uses_alt_shift_without_control(qapp, monkeypatch):
 def test_capture_portal_trigger_preserves_requested_modifiers():
     assert hotkeys._portal_trigger("Alt+Shift+S") == "ALT+SHIFT+s"
     assert hotkeys._portal_trigger("Ctrl+Alt+G") == "CTRL+ALT+g"
+
+
+def test_windows_quick_capture_space_is_distinct_from_screenshot(qapp, monkeypatch):
+    registered = []
+    user32 = SimpleNamespace(
+        RegisterHotKey=Function(lambda window, identifier, modifiers, key: registered.append((identifier, modifiers, key)) or True),
+        UnregisterHotKey=Function(lambda *args: True),
+    )
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *args, **kwargs: user32, raising=False)
+    screenshot = hotkeys._WindowsHotkeys(lambda action: None, (("capture", "Alt+Shift+S", "Capture region"),))
+    quick_capture = hotkeys._WindowsHotkeys(lambda action: None, (("quick_capture", "Ctrl+Alt+Space", "Quick Capture"),))
+    try:
+        assert registered == [(0x5353, 0x4005, ord("S")), (0x5354, 0x4003, 0x20)]
+        assert hotkeys._portal_trigger("Ctrl+Alt+Space") == "CTRL+ALT+space"
+    finally:
+        quick_capture.close()
+        screenshot.close()

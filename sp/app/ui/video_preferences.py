@@ -55,6 +55,9 @@ class VideoPreferences(QWidget):
         self.countdown.setEnabled(self.use_timer.isChecked())
         self.use_timer.toggled.connect(self.countdown.setEnabled)
         form.addRow("Countdown:", self.countdown)
+        self.show_recording_bar = QCheckBox("Show recording controls at the bottom of the screen")
+        self.show_recording_bar.setChecked(self._settings.value("screenRecording/showBar", True, type=bool))
+        form.addRow(self.show_recording_bar)
         layout.addLayout(form)
         note = QLabel("On Wayland, the desktop screen-sharing picker chooses the monitor. "
                       "Monitor and microphone changes in the recorder become the new defaults.")
@@ -78,5 +81,6 @@ class VideoPreferences(QWidget):
             "microphoneName": self.microphone.currentText() if self.microphone.currentData() else "",
             "useCountdown": self.use_timer.isChecked(),
             "countdownSeconds": self.countdown.value(),
+            "showBar": self.show_recording_bar.isChecked(),
         }.items():
             self._settings.setValue("screenRecording/" + key, value)

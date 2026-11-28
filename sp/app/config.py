@@ -1087,16 +1087,24 @@ def remove_quick_capture_history(capture_id: str) -> None:
     _update_global_config({"quick_capture_history": history})
 
 
+def load_quick_capture_last_vault() -> Optional[str]:
+    value = _read_global_config().get("quick_capture_last_vault")
+    return value if isinstance(value, str) and value else None
+
+
+def save_quick_capture_last_vault(vault: str) -> None:
+    _update_global_config({"quick_capture_last_vault": vault})
+
+
 def load_quick_capture_app_hotkey() -> str:
-    payload = _read_global_config()
-    value = payload.get("quick_capture_app_hotkey")
-    if isinstance(value, str) and value.strip():
+    value = _read_global_config().get("quick_capture_app_hotkey")
+    if isinstance(value, str):
         return value.strip()
-    return "ctrl+alt+space"
+    return "Meta+Alt+Space" if platform.system() == "Darwin" else "Ctrl+Alt+Space"
 
 
 def save_quick_capture_app_hotkey(hotkey: str) -> None:
-    value = hotkey.strip() if isinstance(hotkey, str) and hotkey.strip() else ""
+    value = hotkey.strip() if isinstance(hotkey, str) else ""
     _update_global_config({"quick_capture_app_hotkey": value})
 
 

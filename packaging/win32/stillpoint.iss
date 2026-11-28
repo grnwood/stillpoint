@@ -48,10 +48,12 @@ Type: filesandordirs; Name: "{localappdata}\StillPoint"
 Type: files; Name: "{userprograms}\StillPoint.lnk"
 Type: files; Name: "{userprograms}\StillPoint Folder Navigator.lnk"
 Type: files; Name: "{userprograms}\StillPoint Capture.lnk"
+Type: files; Name: "{userprograms}\StillPoint Quick Capture.lnk"
 Type: filesandordirs; Name: "{userprograms}\StillPoint"
 Type: files; Name: "{userdesktop}\StillPoint.lnk"
 Type: files; Name: "{userdesktop}\StillPoint Folder Navigator.lnk"
 Type: files; Name: "{userdesktop}\StillPoint Capture.lnk"
+Type: files; Name: "{userdesktop}\StillPoint Quick Capture.lnk"
 
 ; A taskbar/Start pin stores its old executable path. Unpin it once during
 ; layout migration so Windows cannot keep resolving an obsolete installation.
@@ -60,19 +62,15 @@ Type: files; Name: "{userappdata}\Microsoft\Internet Explorer\Quick Launch\User 
 
 [Dirs]
 Name: "{app}\stillpoint"
-Name: "{app}\stillpoint-capture"
 
 [Files]
 Source: "..\..\dist\stillpoint\*"; DestDir: "{app}\stillpoint"; Flags: recursesubdirs createallsubdirs
-Source: "..\..\dist\stillpoint-capture\*"; DestDir: "{app}\stillpoint-capture"; Flags: recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{userprograms}\StillPoint"; Filename: "{app}\stillpoint\stillpoint.exe"
 Name: "{userprograms}\StillPoint Folder Navigator"; Filename: "{app}\stillpoint\stillpoint.exe"; Parameters: "--folder-navigator"; IconFilename: "{app}\stillpoint\_internal\sp\assets\icons\FolderNavigator.ico"
-Name: "{userprograms}\StillPoint Capture"; Filename: "{app}\stillpoint-capture\stillpoint-capture.exe"
 Name: "{userdesktop}\StillPoint"; Filename: "{app}\stillpoint\stillpoint.exe"; Tasks: desktopicon
 Name: "{userdesktop}\StillPoint Folder Navigator"; Filename: "{app}\stillpoint\stillpoint.exe"; Parameters: "--folder-navigator"; IconFilename: "{app}\stillpoint\_internal\sp\assets\icons\FolderNavigator.ico"; Tasks: desktopicon
-Name: "{userdesktop}\StillPoint Capture"; Filename: "{app}\stillpoint-capture\stillpoint-capture.exe"; Tasks: desktopicon
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop icon"; GroupDescription: "Additional icons:"
@@ -84,7 +82,6 @@ Filename: "{app}\stillpoint\stillpoint.exe"; Description: "Launch StillPoint"; F
 ; Remove runtime leftovers inside application-only bundle directories. User
 ; settings, vaults, templates, and caches are stored outside {app}.
 Type: filesandordirs; Name: "{app}\stillpoint"
-Type: filesandordirs; Name: "{app}\stillpoint-capture"
 Type: files; Name: "{app}\installed-version.txt"
 
 [Code]
